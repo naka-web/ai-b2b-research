@@ -1,5 +1,11 @@
 # AI企業リサーチアシスタント
 
+<img width="1432" height="631" alt="スクリーンショット 2026-07-09 20 37 23" src="https://github.com/user-attachments/assets/77bf9744-2fd3-4704-80e6-ca800788dcf1" />
+<img width="1419" height="739" alt="スクリーンショット 2026-07-09 20 37 41" src="https://github.com/user-attachments/assets/f2a76334-5531-40cd-a1d6-fcc135ad0040" />
+<img width="1436" height="748" alt="スクリーンショット 2026-07-09 20 40 21" src="https://github.com/user-attachments/assets/5967c45f-1fad-47e7-a019-f6617cbe1630" />
+
+
+
 ## デモサイト
 
 https://ai-b2b-research-rgwb.vercel.app
