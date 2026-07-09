@@ -1,36 +1,108 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI企業リサーチアシスタント
 
-## Getting Started
+BtoB営業担当者向けの企業リサーチ支援アプリです。企業検索、企業詳細の確認、AIによる要約、営業提案、営業メール作成までをひとつの画面で試せるMVPとして実装しています。
 
-First, run the development server:
+現在はダミー企業データをベースに動作しつつ、サービス層を分離しているため、将来的にGoogle Maps API、PR TIMES、Wantedlyなどの外部データソースへ差し替えやすい構成にしています。
+
+## 主な機能
+
+- 企業検索
+  - キーワード、地域、業種、従業員数以上で検索
+  - 検索結果件数の表示
+  - 該当なしメッセージの表示
+- 企業一覧
+  - 企業名、業種、地域、従業員数、概要をカード形式で表示
+- 企業詳細
+  - 事業内容、課題、提案できるサービスを表示
+  - 会社HP、Google Maps、PR TIMES、Wantedly、採用ページへの情報ソースリンクを表示
+- AI要約
+  - OpenAI APIを使って企業情報を営業担当者向けに要約
+- AI営業提案
+  - 想定課題、営業切り口、初回提案文、架電トーク例を生成
+- AI営業メール
+  - AI要約と営業提案をもとに、件名と本文を含む丁寧なBtoB営業メールを生成
+
+## 使用技術
+
+- Next.js App Router
+- React
+- TypeScript
+- Tailwind CSS
+- OpenAI Responses API
+- Google Places API (New) 連携用サービス層
+
+## セットアップ
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+ブラウザで以下を開きます。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```text
+http://localhost:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+品質確認用コマンド:
 
-## Learn More
+```bash
+npm run lint
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+## 環境変数
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`.env.local` をプロジェクトルートに作成し、必要な環境変数を設定します。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```env
+OPENAI_API_KEY=your_openai_api_key
+GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+```
 
-## Deploy on Vercel
+| 変数名 | 必須 | 用途 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | AI機能を使う場合は必須 | AI要約、AI営業提案、AI営業メール生成に使用 |
+| `GOOGLE_MAPS_API_KEY` | 任意 | Google Places API (New) で実在企業検索を行うためのキー |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`GOOGLE_MAPS_API_KEY` が未設定、またはGoogle Places APIの呼び出しに失敗した場合は、ダミー企業データへ自動フォールバックします。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`.env.local` は `.gitignore` の `.env*` によりGit管理対象外です。APIキーなどの秘密情報はリポジトリにコミットしないでください。
+
+## ディレクトリ構成
+
+```text
+app/
+  api/
+    companies/route.ts      # 企業検索API
+    sales-email/route.ts    # AI営業メール生成API
+    summarize/route.ts      # AI要約・営業提案生成API
+  page.tsx                  # メイン画面
+services/
+  companyService.ts         # 企業データ取得の集約サービス
+  companyTypes.ts           # 企業データ関連の型定義
+  companySearchOptions.ts   # 検索条件の選択肢
+  googleMapsService.ts      # Google Places API連携
+```
+
+## 設計メモ
+
+企業データ取得は `companyService` を入口にしています。現時点ではGoogle Maps APIが利用可能ならGoogle Places API (New) を呼び出し、利用できない場合はダミーデータへフォールバックします。
+
+将来的にPR TIMESやWantedlyなどを追加する場合も、外部サービスごとの取得処理を `services/` に追加し、`companyService` で統合する方針です。
+
+## 今後の拡張予定
+
+- Google Places APIの検索精度向上
+- PR TIMES検索APIとの連携
+- Wantedlyや採用ページからの採用情報取得
+- 企業ごとのニュース・プレスリリース要約
+- 営業メールのトーン選択
+- CRM連携
+- 検索履歴とお気に入り企業の保存
+- 企業詳細ページのURLルーティング化
+- 認証とユーザー別ワークスペース
+
+## 注意事項
+
+このアプリはポートフォリオ向けMVPです。AIが生成する要約、営業提案、営業メールは営業活動の下書きとして扱い、実際の送信前に必ず人が内容を確認してください。
