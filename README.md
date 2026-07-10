@@ -8,9 +8,6 @@
 <img width="2358" height="1314" alt="2026-07-10 16 34の画像" src="https://github.com/user-attachments/assets/afb31793-68bd-467b-a72b-5171355882e4" />
 <img width="2356" height="1304" alt="2026-07-10 16 33の画像" src="https://github.com/user-attachments/assets/0ce18dc7-6adf-40fc-b17a-d5ca8161b6b0" />
 
-※スクリーンショットはGitHubの編集画面に画像をドラッグ&ドロップして追加してください。
-（画像はトップ画面・企業一覧・AI営業メールの3枚）
-
 ---
 
 ## 概要
