@@ -48,6 +48,9 @@ Google Places API (New) を利用して実在企業を検索し、企業情報�
 npm install
 npm run dev
 
+# 本番ビルド
+npm run build
+
 ---
 
 ## 🚀 今後の開発予定
@@ -70,3 +73,9 @@ npm run dev
 - チーム利用機能
 - API連携の拡充
 - ダッシュボード機能
+
+---
+
+## ライセンス
+
+MIT License
