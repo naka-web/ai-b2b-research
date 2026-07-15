@@ -60,6 +60,23 @@ type RegionConfig = {
   locationRestriction?: LocationRestriction;
 };
 
+type CompanyResult = {
+  id: string;
+  placeId?: string;
+  name: string;
+  primaryCategory?: string;
+  categories: string[];
+  address: string;
+  phone?: string;
+  website?: string;
+  rating?: number;
+  reviewCount?: number;
+  googleMapsUri?: string;
+  businessStatus?: string;
+  openNow?: boolean;
+  openingHours: string[];
+};
+
 const regionConfigs: Record<string, RegionConfig> = {
   札幌: {
     label: "札幌市周辺",
@@ -92,6 +109,35 @@ const regionConfigs: Record<string, RegionConfig> = {
     },
   },
 };
+
+function normalizeDedupValue(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function getCompanyDedupKey(company: CompanyResult) {
+  if (company.placeId) {
+    return `place:${company.placeId}`;
+  }
+
+  return `name-address:${normalizeDedupValue(company.name)}:${normalizeDedupValue(
+    company.address,
+  )}`;
+}
+
+function deduplicateCompanies(companies: CompanyResult[]) {
+  const seenKeys = new Set<string>();
+
+  return companies.filter((company) => {
+    const key = getCompanyDedupKey(company);
+
+    if (seenKeys.has(key)) {
+      return false;
+    }
+
+    seenKeys.add(key);
+    return true;
+  });
+}
 
 export async function GET(request: NextRequest) {
   const apiKey =
@@ -170,7 +216,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const companies = ((payload.places || []) as GooglePlace[]).map(
+  const mappedCompanies = ((payload.places || []) as GooglePlace[]).map(
     (place, index) => {
       const openingHours =
         place.regularOpeningHours?.weekdayDescriptions ||
@@ -184,6 +230,7 @@ export async function GET(request: NextRequest) {
 
       return {
         id: place.id || `${place.displayName?.text || "place"}-${index}`,
+        placeId: place.id,
         name: place.displayName?.text || "名称未取得",
         primaryCategory: primaryCategory || undefined,
         categories,
@@ -201,6 +248,7 @@ export async function GET(request: NextRequest) {
       };
     },
   );
+  const companies = deduplicateCompanies(mappedCompanies);
 
   return NextResponse.json({
     companies,

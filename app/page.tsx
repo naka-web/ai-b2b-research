@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 
 const industries = [
   "歯科",
@@ -21,6 +22,7 @@ const regions = [
 
 type Company = {
   id: string;
+  placeId?: string;
   name: string;
   primaryCategory?: string;
   categories?: string[];
@@ -61,6 +63,13 @@ type SalesEmail = {
   body: string;
 };
 
+type ExportCompanyRow = {
+  会社名: string;
+  住所: string;
+  電話番号: string;
+  "Google Maps URL": string;
+};
+
 export default function Home() {
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
@@ -76,6 +85,7 @@ export default function Home() {
   const [regionScope, setRegionScope] = useState("");
   const [activeSearch, setActiveSearch] = useState<SearchValues | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
+  const [selectedCompanyIds, setSelectedCompanyIds] = useState<string[]>([]);
   const [isGeneratingSalesEmail, setIsGeneratingSalesEmail] = useState(false);
   const [salesEmail, setSalesEmail] = useState<SalesEmail | null>(null);
   const [salesEmailError, setSalesEmailError] = useState("");
@@ -89,6 +99,20 @@ export default function Home() {
       .filter(Boolean)
       .join(" / ");
   }, [industry, keyword, region]);
+
+  const selectedCompanyCount = useMemo(() => {
+    const visibleCompanyIds = new Set(companies.map((company) => company.id));
+
+    return selectedCompanyIds.filter((companyId) =>
+      visibleCompanyIds.has(companyId),
+    ).length;
+  }, [companies, selectedCompanyIds]);
+
+  const selectedCompanies = useMemo(() => {
+    const selectedIds = new Set(selectedCompanyIds);
+
+    return companies.filter((company) => selectedIds.has(company.id));
+  }, [companies, selectedCompanyIds]);
 
   async function fetchPlaces(searchValues: SearchValues, pageToken?: string) {
     const params = new URLSearchParams(searchValues);
@@ -113,16 +137,37 @@ export default function Home() {
     currentCompanies: Company[],
     incomingCompanies: Company[],
   ) {
-    const seenIds = new Set(currentCompanies.map((company) => company.id));
+    const seenKeys = new Set(currentCompanies.map(getCompanyDedupKey));
     const uniqueIncoming = incomingCompanies.filter((company) => {
-      if (seenIds.has(company.id)) {
+      const dedupKey = getCompanyDedupKey(company);
+
+      if (seenKeys.has(dedupKey)) {
         return false;
       }
-      seenIds.add(company.id);
+
+      seenKeys.add(dedupKey);
       return true;
     });
 
     return [...currentCompanies, ...uniqueIncoming];
+  }
+
+  function normalizeDedupValue(value: string) {
+    return value.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function getCompanyDedupKey(company: Company) {
+    if (company.placeId) {
+      return `place:${company.placeId}`;
+    }
+
+    return `name-address:${normalizeDedupValue(company.name)}:${normalizeDedupValue(
+      company.address,
+    )}`;
+  }
+
+  function deduplicateCompanies(targetCompanies: Company[]) {
+    return mergeCompanies([], targetCompanies);
   }
 
   async function handleSearch(event: FormEvent<HTMLFormElement>) {
@@ -135,6 +180,7 @@ export default function Home() {
     setResolvedQuery("");
     setRegionScope("");
     setSelectedCompany(null);
+    setSelectedCompanyIds([]);
     resetSalesEmail();
 
     const formData = new FormData(event.currentTarget);
@@ -160,7 +206,7 @@ export default function Home() {
     try {
       const payload = await fetchPlaces(searchValues);
       setActiveSearch(searchValues);
-      setCompanies(payload.companies);
+      setCompanies(deduplicateCompanies(payload.companies));
       setNextPageToken(payload.nextPageToken);
       setHasNextPage(payload.hasNextPage);
       setResolvedQuery(payload.query);
@@ -248,6 +294,89 @@ export default function Home() {
   function handleSelectCompany(company: Company) {
     setSelectedCompany(company);
     resetSalesEmail();
+  }
+
+  function toggleCompanySelection(companyId: string) {
+    setSelectedCompanyIds((currentIds) =>
+      currentIds.includes(companyId)
+        ? currentIds.filter((currentId) => currentId !== companyId)
+        : [...currentIds, companyId],
+    );
+  }
+
+  function escapeCsvValue(value: string | undefined) {
+    return `"${(value || "").replaceAll("\"", "\"\"")}"`;
+  }
+
+  function getExportDateString() {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
+    const day = String(today.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  }
+
+  function getExportRows(): ExportCompanyRow[] {
+    return selectedCompanies.map((company) => ({
+      会社名: company.name,
+      住所: company.address,
+      電話番号: company.phone || "",
+      "Google Maps URL": company.googleMapsUri || "",
+    }));
+  }
+
+  function handleExportCsv() {
+    if (selectedCompanies.length === 0) {
+      return;
+    }
+
+    const headers = [
+      "会社名",
+      "住所",
+      "電話番号",
+      "Google Maps URL",
+    ] as const;
+    const rows = getExportRows().map((company) =>
+      headers.map((header) => company[header]),
+    );
+    const csvBody = [headers, ...rows]
+      .map((row) => row.map(escapeCsvValue).join(","))
+      .join("\r\n");
+    const blob = new Blob([`\uFEFF${csvBody}`], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `companies_${getExportDateString()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleExportExcel() {
+    if (selectedCompanies.length === 0) {
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(getExportRows(), {
+      header: ["会社名", "住所", "電話番号", "Google Maps URL"],
+    });
+    worksheet["!cols"] = [
+      { wch: 30 },
+      { wch: 50 },
+      { wch: 18 },
+      { wch: 70 },
+    ];
+    const workbook = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(workbook, worksheet, "企業一覧");
+    XLSX.writeFile(workbook, `companies_${getExportDateString()}.xlsx`, {
+      compression: true,
+    });
   }
 
   async function handleGenerateSalesEmail() {
@@ -595,10 +724,33 @@ export default function Home() {
                 {searchSummary}
               </h2>
             </div>
-            <p className="text-sm font-semibold text-slate-600">
-              {companies.length}件 / 次ページ
-              {hasNextPage ? "あり" : "なし"}
-            </p>
+            <div className="flex flex-col gap-1 sm:items-end">
+              <p className="text-sm font-semibold text-slate-600">
+                {companies.length}件 / 次ページ
+                {hasNextPage ? "あり" : "なし"}
+              </p>
+              <div className="flex flex-wrap items-center gap-3 sm:justify-end">
+                <p className="text-sm font-semibold text-teal-700">
+                  {selectedCompanyCount}件選択中
+                </p>
+                <button
+                  type="button"
+                  onClick={handleExportCsv}
+                  disabled={selectedCompanies.length === 0}
+                  className="h-9 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                >
+                  CSV出力
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportExcel}
+                  disabled={selectedCompanies.length === 0}
+                  className="h-9 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                >
+                  Excel出力
+                </button>
+              </div>
+            </div>
           </div>
 
           {searched ? (
@@ -625,73 +777,92 @@ export default function Home() {
           ) : null}
 
           <div className="grid gap-3">
-            {companies.map((company) => (
-              <article
-                key={company.id}
-                onClick={() => handleSelectCompany(company)}
-                className="grid gap-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm lg:grid-cols-[1.4fr_1fr_auto] lg:items-center"
-              >
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-950">
-                    {company.name}
-                  </h3>
-                  <p className="mt-1 text-sm leading-6 text-slate-600">
-                    {company.address}
-                  </p>
-                </div>
+            {companies.map((company) => {
+              const isSelected = selectedCompanyIds.includes(company.id);
 
-                <dl className="grid gap-1 text-sm text-slate-600">
-                  {company.rating ? (
-                    <div className="flex gap-2">
-                      <dt className="font-medium text-slate-800">評価</dt>
-                      <dd>
-                        {company.rating}
-                        {company.reviewCount
-                          ? ` (${company.reviewCount}件)`
-                          : ""}
-                      </dd>
-                    </div>
-                  ) : null}
-                  {company.phone ? (
-                    <div className="flex gap-2">
-                      <dt className="font-medium text-slate-800">電話</dt>
-                      <dd>{company.phone}</dd>
-                    </div>
-                  ) : null}
-                  {company.businessStatus ? (
-                    <div className="flex gap-2">
-                      <dt className="font-medium text-slate-800">状態</dt>
-                      <dd>{company.businessStatus}</dd>
-                    </div>
-                  ) : null}
-                </dl>
+              return (
+                <article
+                  key={company.id}
+                  onClick={() => handleSelectCompany(company)}
+                  className={`grid cursor-pointer grid-cols-[auto_1fr] gap-4 rounded-lg border bg-white p-5 shadow-sm transition hover:border-slate-300 lg:grid-cols-[auto_1.4fr_1fr_auto] lg:items-center ${
+                    isSelected
+                      ? "border-teal-300 ring-1 ring-teal-100"
+                      : "border-slate-200"
+                  }`}
+                >
+                  <div className="flex items-start pt-1">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleCompanySelection(company.id)}
+                      onClick={(event) => event.stopPropagation()}
+                      aria-label={`${company.name}を選択`}
+                      className="h-5 w-5 rounded border-slate-300 text-teal-700 accent-teal-700 focus:ring-2 focus:ring-teal-200"
+                    />
+                  </div>
 
-                <div className="flex flex-wrap gap-3 lg:justify-end">
-                  {company.website ? (
-                    <a
-                      href={company.website}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => event.stopPropagation()}
-                      className="text-sm font-semibold text-teal-700 hover:text-teal-900"
-                    >
-                      Webサイト
-                    </a>
-                  ) : null}
-                  {company.googleMapsUri ? (
-                    <a
-                      href={company.googleMapsUri}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => event.stopPropagation()}
-                      className="text-sm font-semibold text-teal-700 hover:text-teal-900"
-                    >
-                      Google Maps
-                    </a>
-                  ) : null}
-                </div>
-              </article>
-            ))}
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-950">
+                      {company.name}
+                    </h3>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">
+                      {company.address}
+                    </p>
+                  </div>
+
+                  <dl className="col-start-2 grid gap-1 text-sm text-slate-600 lg:col-auto">
+                    {company.rating ? (
+                      <div className="flex gap-2">
+                        <dt className="font-medium text-slate-800">評価</dt>
+                        <dd>
+                          {company.rating}
+                          {company.reviewCount
+                            ? ` (${company.reviewCount}件)`
+                            : ""}
+                        </dd>
+                      </div>
+                    ) : null}
+                    {company.phone ? (
+                      <div className="flex gap-2">
+                        <dt className="font-medium text-slate-800">電話</dt>
+                        <dd>{company.phone}</dd>
+                      </div>
+                    ) : null}
+                    {company.businessStatus ? (
+                      <div className="flex gap-2">
+                        <dt className="font-medium text-slate-800">状態</dt>
+                        <dd>{company.businessStatus}</dd>
+                      </div>
+                    ) : null}
+                  </dl>
+
+                  <div className="col-start-2 flex flex-wrap gap-3 lg:col-auto lg:justify-end">
+                    {company.website ? (
+                      <a
+                        href={company.website}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                        className="text-sm font-semibold text-teal-700 hover:text-teal-900"
+                      >
+                        Webサイト
+                      </a>
+                    ) : null}
+                    {company.googleMapsUri ? (
+                      <a
+                        href={company.googleMapsUri}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                        className="text-sm font-semibold text-teal-700 hover:text-teal-900"
+                      >
+                        Google Maps
+                      </a>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })}
           </div>
 
           {!isLoading && searched && !error && companies.length === 0 ? (
