@@ -19,7 +19,6 @@ Google Places API (New) を利用して実在企業を検索し、企業情報�
 
 ## 主な機能
 
-## 主な機能
 
 - Google Places API (New)による実在企業検索
 - キーワード・地域・業種で検索
