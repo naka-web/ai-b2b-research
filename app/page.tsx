@@ -2,6 +2,12 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import {
+  createPendingEnrichment,
+  type Company,
+  type CompanyEnrichment,
+  type FinalAssessment,
+} from "@/services/companyResearchTypes";
 
 const industries = [
   "歯科",
@@ -35,26 +41,30 @@ const searchSets = {
 
 type SearchSetKey = "" | keyof typeof searchSets;
 
-type Company = {
-  id: string;
-  placeId?: string;
-  name: string;
-  primaryCategory?: string;
-  categories?: string[];
-  address: string;
-  phone?: string;
-  website?: string;
-  rating?: number;
-  reviewCount?: number;
-  googleMapsUri?: string;
-  businessStatus?: string;
-  openNow?: boolean;
-  openingHours?: string[];
-  hitKeywords: string[];
-};
-
 type PlacesPayload = {
-  companies: Company[];
+  companies: Array<
+    Omit<
+      Company,
+      | "hitKeywords"
+      | "publicEmails"
+      | "suitability"
+      | "suitabilityScore"
+      | "suitabilityReasons"
+      | "evidenceUrls"
+      | "enrichmentStatus"
+      | "retrievalStatus"
+      | "matchaHandlingStatus"
+      | "matchaHandlingType"
+      | "matchaHandlingReasons"
+      | "matchaEvidenceUrls"
+      | "b2bSuitability"
+      | "b2bReasons"
+      | "b2bEvidenceUrls"
+      | "b2bBusinessTypes"
+      | "finalAssessment"
+      | "scoreBreakdown"
+    >
+  >;
   query: string;
   regionScope: string;
   nextPageToken: string | null;
@@ -89,6 +99,21 @@ type ExportCompanyRow = {
   住所: string;
   電話番号: string;
   "公式サイトURL": string;
+  "問い合わせフォームURL": string;
+  "公開メールアドレス": string;
+  適合度: string;
+  判定スコア: number;
+  判定理由: string;
+  "判定根拠URL": string;
+  "抹茶取扱状況": string;
+  "抹茶取扱種別": string;
+  "抹茶取扱理由": string;
+  "抹茶取扱根拠URL": string;
+  "BtoB適合度": string;
+  "BtoB取引種別": string;
+  "BtoB判定理由": string;
+  "BtoB根拠URL": string;
+  "最終判定": string;
   "Google Maps URL": string;
   "ヒットした検索ワード": string;
 };
@@ -112,6 +137,12 @@ export default function Home() {
   const [isGeneratingSalesEmail, setIsGeneratingSalesEmail] = useState(false);
   const [salesEmail, setSalesEmail] = useState<SalesEmail | null>(null);
   const [salesEmailError, setSalesEmailError] = useState("");
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichmentError, setEnrichmentError] = useState("");
+  const [suitabilityFilter, setSuitabilityFilter] = useState<"すべて" | FinalAssessment>(
+    "すべて",
+  );
+  const [sortBySuitability, setSortBySuitability] = useState(true);
 
   const searchSummary = useMemo(() => {
     return [
@@ -137,6 +168,26 @@ export default function Home() {
     return companies.filter((company) => selectedIds.has(company.id));
   }, [companies, selectedCompanyIds]);
 
+  const visibleCompanies = useMemo(() => {
+    const levelOrder: Record<FinalAssessment, number> = {
+      高: 3,
+      中: 2,
+      要確認: 1,
+      低: 0,
+    };
+    const filtered =
+      suitabilityFilter === "すべて"
+        ? companies
+        : companies.filter((company) => company.suitability === suitabilityFilter);
+
+    if (!sortBySuitability) return filtered;
+    return [...filtered].sort(
+      (first, second) =>
+        levelOrder[second.suitability] - levelOrder[first.suitability] ||
+        second.suitabilityScore - first.suitabilityScore,
+    );
+  }, [companies, sortBySuitability, suitabilityFilter]);
+
   async function fetchPlaces(searchValues: SearchValues, pageToken?: string) {
     const params = new URLSearchParams(searchValues);
 
@@ -154,6 +205,109 @@ export default function Home() {
     }
 
     return payload as PlacesPayload;
+  }
+
+  function addPendingEnrichment(
+    company: PlacesPayload["companies"][number],
+    hitKeyword: string,
+  ): Company {
+    return {
+      ...company,
+      ...createPendingEnrichment(),
+      hitKeywords: [hitKeyword],
+    };
+  }
+
+  async function enrichCompanyResults(targetCompanies: Company[]) {
+    if (targetCompanies.length === 0) return;
+
+    const batchSize = 8;
+    const targetIds = new Set(targetCompanies.map((company) => company.id));
+    setIsEnriching(true);
+    setEnrichmentError("");
+    setCompanies((currentCompanies) =>
+      currentCompanies.map((company) =>
+        targetIds.has(company.id)
+          ? { ...company, enrichmentStatus: "調査中" }
+          : company,
+      ),
+    );
+
+    const failedIds = new Set<string>();
+    const errors: string[] = [];
+
+    for (let start = 0; start < targetCompanies.length; start += batchSize) {
+      const batch = targetCompanies.slice(start, start + batchSize);
+      try {
+        const response = await fetch("/api/company-enrichment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            companies: batch.map((company) => ({
+              id: company.id,
+              name: company.name,
+              website: company.website,
+              primaryCategory: company.primaryCategory,
+              categories: company.categories,
+            })),
+          }),
+        });
+        const payload = (await response.json()) as {
+          results?: CompanyEnrichment[];
+          error?: string;
+        };
+
+        if (!response.ok || !payload.results) {
+          throw new Error(payload.error || "公式サイトの調査に失敗しました。");
+        }
+
+        const resultsById = new Map(payload.results.map((result) => [result.id, result]));
+        const mergeResult = (company: Company) => {
+          const result = resultsById.get(company.id);
+          return result ? { ...company, ...result } : company;
+        };
+        setCompanies((currentCompanies) => currentCompanies.map(mergeResult));
+        setSelectedCompany((currentCompany) =>
+          currentCompany ? mergeResult(currentCompany) : null,
+        );
+      } catch (caught) {
+        batch.forEach((company) => failedIds.add(company.id));
+        errors.push(
+          caught instanceof Error ? caught.message : "公式サイトの調査に失敗しました。",
+        );
+      }
+    }
+
+    if (failedIds.size > 0) {
+      setCompanies((currentCompanies) =>
+        currentCompanies.map((company) =>
+          failedIds.has(company.id)
+            ? {
+                ...company,
+                enrichmentStatus: "取得失敗",
+                retrievalStatus: "取得失敗",
+                suitability: "要確認",
+                suitabilityScore: 0,
+                suitabilityReasons: [
+                  "補完APIに接続できず、公式サイトを確認できませんでした",
+                ],
+                matchaHandlingStatus: "未確認",
+                matchaHandlingType: "不明",
+                matchaHandlingReasons: ["補完APIに接続できませんでした"],
+                matchaEvidenceUrls: [],
+                b2bSuitability: "判定不能",
+                b2bReasons: ["補完APIに接続できませんでした"],
+                b2bEvidenceUrls: [],
+                b2bBusinessTypes: [],
+                finalAssessment: "要確認",
+                scoreBreakdown: [],
+              }
+            : company,
+        ),
+      );
+      setEnrichmentError([...new Set(errors)].join(" / "));
+    }
+    setIsEnriching(false);
   }
 
   function mergeCompanies(
@@ -238,6 +392,7 @@ export default function Home() {
     setRegionScope("");
     setSelectedCompany(null);
     setSelectedCompanyIds([]);
+    setEnrichmentError("");
     resetSalesEmail();
 
     const formData = new FormData(event.currentTarget);
@@ -278,10 +433,9 @@ export default function Home() {
           keyword: searchKeyword,
         };
         const payload = await fetchPlaces(currentSearchValues);
-        const companiesWithHitKeyword = payload.companies.map((company) => ({
-          ...company,
-          hitKeywords: [searchKeyword.trim() || "企業"],
-        }));
+        const companiesWithHitKeyword = payload.companies.map((company) =>
+          addPendingEnrichment(company, searchKeyword.trim() || "企業"),
+        );
 
         mergedCompanies = mergeCompanies(
           mergedCompanies,
@@ -302,6 +456,8 @@ export default function Home() {
       );
       setResolvedQuery(resolvedQueries.join(" / "));
       setRegionScope(resolvedRegionScope);
+      setIsLoading(false);
+      await enrichCompanyResults(mergedCompanies);
     } catch (caught) {
       setCompanies([]);
       setHasNextPage(false);
@@ -339,12 +495,12 @@ export default function Home() {
         );
         const hitKeyword = activeSearch.searchValues.keyword.trim() || "企業";
 
+        const mappedCompanies = payload.companies.map((company) =>
+          addPendingEnrichment(company, hitKeyword),
+        );
         additionalCompanies = mergeCompanies(
           additionalCompanies,
-          payload.companies.map((company) => ({
-            ...company,
-            hitKeywords: [hitKeyword],
-          })),
+          mappedCompanies,
         );
         const searchIndex = updatedSearches.indexOf(activeSearch);
         updatedSearches[searchIndex] = {
@@ -353,13 +509,16 @@ export default function Home() {
         };
       }
 
-      setCompanies((currentCompanies) =>
-        mergeCompanies(currentCompanies, additionalCompanies),
+      const newCompanies = additionalCompanies.filter(
+        (company) =>
+          !companies.some((currentCompany) => isSameCompany(currentCompany, company)),
       );
+      setCompanies((currentCompanies) => mergeCompanies(currentCompanies, additionalCompanies));
       setActiveSearches(updatedSearches);
       setHasNextPage(
         updatedSearches.some((search) => Boolean(search.nextPageToken)),
       );
+      await enrichCompanyResults(newCompanies);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -421,8 +580,8 @@ export default function Home() {
     );
   }
 
-  function escapeCsvValue(value: string | undefined) {
-    return `"${(value || "").replaceAll("\"", "\"\"")}"`;
+  function escapeCsvValue(value: string | number | undefined) {
+    return `"${String(value ?? "").replaceAll("\"", "\"\"")}"`;
   }
 
   function getExportDateString() {
@@ -440,6 +599,21 @@ export default function Home() {
       住所: company.address,
       電話番号: company.phone || "",
       "公式サイトURL": company.website || "",
+      "問い合わせフォームURL": company.contactFormUrl || "",
+      "公開メールアドレス": company.publicEmails.join(" / "),
+      適合度: company.suitability,
+      判定スコア: company.suitabilityScore,
+      判定理由: company.suitabilityReasons.join(" / "),
+      "判定根拠URL": company.evidenceUrls.join(" / "),
+      "抹茶取扱状況": company.matchaHandlingStatus,
+      "抹茶取扱種別": company.matchaHandlingType,
+      "抹茶取扱理由": company.matchaHandlingReasons.join(" / "),
+      "抹茶取扱根拠URL": company.matchaEvidenceUrls.join(" / "),
+      "BtoB適合度": company.b2bSuitability,
+      "BtoB取引種別": company.b2bBusinessTypes.join(" / "),
+      "BtoB判定理由": company.b2bReasons.join(" / "),
+      "BtoB根拠URL": company.b2bEvidenceUrls.join(" / "),
+      "最終判定": company.finalAssessment,
       "Google Maps URL": company.googleMapsUri || "",
       "ヒットした検索ワード": company.hitKeywords.join(" / "),
     }));
@@ -455,6 +629,21 @@ export default function Home() {
       "住所",
       "電話番号",
       "公式サイトURL",
+      "問い合わせフォームURL",
+      "公開メールアドレス",
+      "適合度",
+      "判定スコア",
+      "判定理由",
+      "判定根拠URL",
+      "抹茶取扱状況",
+      "抹茶取扱種別",
+      "抹茶取扱理由",
+      "抹茶取扱根拠URL",
+      "BtoB適合度",
+      "BtoB取引種別",
+      "BtoB判定理由",
+      "BtoB根拠URL",
+      "最終判定",
       "Google Maps URL",
       "ヒットした検索ワード",
     ] as const;
@@ -489,6 +678,21 @@ export default function Home() {
         "住所",
         "電話番号",
         "公式サイトURL",
+        "問い合わせフォームURL",
+        "公開メールアドレス",
+        "適合度",
+        "判定スコア",
+        "判定理由",
+        "判定根拠URL",
+        "抹茶取扱状況",
+        "抹茶取扱種別",
+        "抹茶取扱理由",
+        "抹茶取扱根拠URL",
+        "BtoB適合度",
+        "BtoB取引種別",
+        "BtoB判定理由",
+        "BtoB根拠URL",
+        "最終判定",
         "Google Maps URL",
         "ヒットした検索ワード",
       ],
@@ -497,6 +701,21 @@ export default function Home() {
       { wch: 30 },
       { wch: 50 },
       { wch: 18 },
+      { wch: 70 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 80 },
+      { wch: 70 },
+      { wch: 16 },
+      { wch: 30 },
+      { wch: 80 },
+      { wch: 70 },
+      { wch: 16 },
+      { wch: 70 },
+      { wch: 40 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 80 },
       { wch: 70 },
       { wch: 70 },
       { wch: 45 },
@@ -582,6 +801,46 @@ export default function Home() {
       },
       { label: "電話番号", value: selectedCompany.phone || "情報なし" },
       {
+        label: "問い合わせフォームURL",
+        value: selectedCompany.contactFormUrl || "情報なし",
+      },
+      {
+        label: "公開メールアドレス",
+        value: selectedCompany.publicEmails.join(" / ") || "情報なし",
+      },
+      {
+        label: "抹茶取扱状況",
+        value: selectedCompany.matchaHandlingStatus,
+      },
+      {
+        label: "抹茶取扱種別",
+        value: selectedCompany.matchaHandlingType,
+      },
+      {
+        label: "抹茶取扱理由",
+        value: selectedCompany.matchaHandlingReasons.join(" / ") || "情報なし",
+      },
+      {
+        label: "BtoB適合度",
+        value: selectedCompany.b2bSuitability,
+      },
+      {
+        label: "BtoB取引種別",
+        value: selectedCompany.b2bBusinessTypes.join(" / ") || "不明",
+      },
+      {
+        label: "BtoB判定理由",
+        value: selectedCompany.b2bReasons.join(" / ") || "情報なし",
+      },
+      {
+        label: "最終判定",
+        value: `${selectedCompany.finalAssessment}（総合スコア ${selectedCompany.suitabilityScore}点）`,
+      },
+      {
+        label: "スコア内訳",
+        value: selectedCompany.scoreBreakdown.join(" / ") || "情報なし",
+      },
+      {
         label: "ヒットした検索ワード",
         value: selectedCompany.hitKeywords.join(" / ") || "情報なし",
       },
@@ -650,6 +909,58 @@ export default function Home() {
                   </div>
                 ))}
               </dl>
+            </section>
+
+            <section className="mb-6">
+              <h2 className="mb-3 text-base font-semibold text-slate-950">
+                抹茶取扱根拠URL
+              </h2>
+              {selectedCompany.matchaEvidenceUrls.length > 0 ? (
+                <ul className="grid gap-2 rounded-md border border-slate-200 p-4 text-sm">
+                  {selectedCompany.matchaEvidenceUrls.map((url) => (
+                    <li key={url}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="break-all font-medium text-teal-700 hover:text-teal-900"
+                      >
+                        {url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="rounded-md border border-slate-200 p-4 text-sm text-slate-600">
+                  抹茶取扱の根拠ページを確認できませんでした。
+                </p>
+              )}
+            </section>
+
+            <section className="mb-6">
+              <h2 className="mb-3 text-base font-semibold text-slate-950">
+                BtoB根拠URL
+              </h2>
+              {selectedCompany.b2bEvidenceUrls.length > 0 ? (
+                <ul className="grid gap-2 rounded-md border border-slate-200 p-4 text-sm">
+                  {selectedCompany.b2bEvidenceUrls.map((url) => (
+                    <li key={url}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="break-all font-medium text-teal-700 hover:text-teal-900"
+                      >
+                        {url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="rounded-md border border-slate-200 p-4 text-sm text-slate-600">
+                  BtoB判定の根拠ページを確認できませんでした。
+                </p>
+              )}
             </section>
 
             <section className="mb-6">
@@ -752,6 +1063,16 @@ export default function Home() {
                   className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-teal-700 hover:bg-slate-50"
                 >
                   Webサイト
+                </a>
+              ) : null}
+              {selectedCompany.contactFormUrl ? (
+                <a
+                  href={selectedCompany.contactFormUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-teal-700 hover:bg-slate-50"
+                >
+                  問い合わせフォーム
                 </a>
               ) : null}
             </div>
@@ -869,10 +1190,10 @@ export default function Home() {
 
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || isEnriching}
             className="h-12 rounded-md bg-slate-950 px-6 text-base font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
           >
-            {isLoading ? "検索中..." : "検索"}
+            {isLoading ? "検索中..." : isEnriching ? "公式サイト調査中..." : "検索"}
           </button>
         </form>
 
@@ -913,6 +1234,45 @@ export default function Home() {
             </div>
           </div>
 
+          <div className="mb-4 flex flex-wrap items-end gap-4 rounded-md border border-slate-200 bg-white p-4">
+            <label className="grid gap-1 text-sm font-medium text-slate-700">
+              最終判定で絞り込み
+              <select
+                value={suitabilityFilter}
+                onChange={(event) =>
+                  setSuitabilityFilter(event.target.value as "すべて" | FinalAssessment)
+                }
+                className="h-10 rounded-md border border-slate-300 bg-white px-3"
+              >
+                <option value="すべて">すべて</option>
+                <option value="高">高</option>
+                <option value="中">中</option>
+                <option value="要確認">要確認</option>
+                <option value="低">低</option>
+              </select>
+            </label>
+            <label className="flex h-10 items-center gap-2 text-sm font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={sortBySuitability}
+                onChange={(event) => setSortBySuitability(event.target.checked)}
+                className="h-4 w-4 accent-teal-700"
+              />
+              最終判定の高い順
+            </label>
+            {isEnriching ? (
+              <p className="text-sm font-semibold text-teal-700">
+                公式サイトを調査中…（検索結果は先に利用できます）
+              </p>
+            ) : null}
+          </div>
+
+          {enrichmentError ? (
+            <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              {enrichmentError} Google Placesの検索結果は保持されています。
+            </div>
+          ) : null}
+
           {searched ? (
             <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 text-sm text-slate-600">
               <p>
@@ -937,7 +1297,7 @@ export default function Home() {
           ) : null}
 
           <div className="grid gap-3">
-            {companies.map((company) => {
+            {visibleCompanies.map((company) => {
               const isSelected = selectedCompanyIds.includes(company.id);
 
               return (
@@ -970,6 +1330,27 @@ export default function Home() {
                     </p>
                     <p className="mt-2 text-xs leading-5 text-slate-500">
                       ヒットした検索ワード: {company.hitKeywords.join(" / ")}
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span
+                        className={`rounded-full px-2.5 py-1 font-semibold ${
+                          company.suitability === "高"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : company.suitability === "中"
+                              ? "bg-amber-100 text-amber-800"
+                              : company.suitability === "低"
+                                ? "bg-slate-200 text-slate-700"
+                                : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        最終判定: {company.finalAssessment}（{company.suitabilityScore}点）
+                      </span>
+                      <span className="text-slate-500">
+                        {company.enrichmentStatus}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-slate-600">
+                      抹茶取扱: {company.matchaHandlingStatus} / BtoB: {company.b2bSuitability}
                     </p>
                   </div>
 
@@ -1022,6 +1403,17 @@ export default function Home() {
                         Google Maps
                       </a>
                     ) : null}
+                    {company.contactFormUrl ? (
+                      <a
+                        href={company.contactFormUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                        className="text-sm font-semibold text-teal-700 hover:text-teal-900"
+                      >
+                        問い合わせ
+                      </a>
+                    ) : null}
                   </div>
                 </article>
               );
@@ -1039,7 +1431,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={handleLoadMore}
-                disabled={isLoadingMore}
+                disabled={isLoadingMore || isEnriching}
                 className="h-11 rounded-md border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"
               >
                 {isLoadingMore ? "読み込み中..." : "さらに読み込む"}
