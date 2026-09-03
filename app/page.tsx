@@ -20,6 +20,21 @@ const regions = [
   "福岡",
 ];
 
+const searchSets = {
+  matchaDomesticTrading: {
+    label: "抹茶を扱う国内商社",
+    keywords: [
+      "抹茶 商社",
+      "抹茶 卸売",
+      "抹茶 業務用",
+      "抹茶 原料 卸",
+      "抹茶 法人向け",
+    ],
+  },
+} as const;
+
+type SearchSetKey = "" | keyof typeof searchSets;
+
 type Company = {
   id: string;
   placeId?: string;
@@ -35,6 +50,7 @@ type Company = {
   businessStatus?: string;
   openNow?: boolean;
   openingHours?: string[];
+  hitKeywords: string[];
 };
 
 type PlacesPayload = {
@@ -49,6 +65,11 @@ type SearchValues = {
   keyword: string;
   region: string;
   industry: string;
+};
+
+type ActiveSearch = {
+  searchValues: SearchValues;
+  nextPageToken: string | null;
 };
 
 type SalesProposal = {
@@ -67,23 +88,25 @@ type ExportCompanyRow = {
   会社名: string;
   住所: string;
   電話番号: string;
+  "公式サイトURL": string;
   "Google Maps URL": string;
+  "ヒットした検索ワード": string;
 };
 
 export default function Home() {
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
   const [industry, setIndustry] = useState("");
+  const [searchSetKey, setSearchSetKey] = useState<SearchSetKey>("");
   const [companies, setCompanies] = useState<Company[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
-  const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [hasNextPage, setHasNextPage] = useState(false);
   const [resolvedQuery, setResolvedQuery] = useState("");
   const [regionScope, setRegionScope] = useState("");
-  const [activeSearch, setActiveSearch] = useState<SearchValues | null>(null);
+  const [activeSearches, setActiveSearches] = useState<ActiveSearch[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<string[]>([]);
   const [isGeneratingSalesEmail, setIsGeneratingSalesEmail] = useState(false);
@@ -92,13 +115,13 @@ export default function Home() {
 
   const searchSummary = useMemo(() => {
     return [
-      keyword.trim() || "企業",
+      searchSetKey ? searchSets[searchSetKey].label : keyword.trim() || "企業",
       industry || "指定なし",
       region || "地域未選択",
     ]
       .filter(Boolean)
       .join(" / ");
-  }, [industry, keyword, region]);
+  }, [industry, keyword, region, searchSetKey]);
 
   const selectedCompanyCount = useMemo(() => {
     const visibleCompanyIds = new Set(companies.map((company) => company.id));
@@ -137,37 +160,72 @@ export default function Home() {
     currentCompanies: Company[],
     incomingCompanies: Company[],
   ) {
-    const seenKeys = new Set(currentCompanies.map(getCompanyDedupKey));
-    const uniqueIncoming = incomingCompanies.filter((company) => {
-      const dedupKey = getCompanyDedupKey(company);
+    const mergedCompanies = [...currentCompanies];
 
-      if (seenKeys.has(dedupKey)) {
-        return false;
+    incomingCompanies.forEach((company) => {
+      const existingIndex = mergedCompanies.findIndex((currentCompany) =>
+        isSameCompany(currentCompany, company),
+      );
+
+      if (existingIndex === -1) {
+        mergedCompanies.push(company);
+        return;
       }
 
-      seenKeys.add(dedupKey);
-      return true;
+      const existingCompany = mergedCompanies[existingIndex];
+      mergedCompanies[existingIndex] = {
+        ...company,
+        ...existingCompany,
+        hitKeywords: Array.from(
+          new Set([
+            ...existingCompany.hitKeywords,
+            ...company.hitKeywords,
+          ]),
+        ),
+      };
     });
 
-    return [...currentCompanies, ...uniqueIncoming];
+    return mergedCompanies;
   }
 
   function normalizeDedupValue(value: string) {
     return value.trim().replace(/\s+/g, " ").toLowerCase();
   }
 
-  function getCompanyDedupKey(company: Company) {
-    if (company.placeId) {
-      return `place:${company.placeId}`;
-    }
-
-    return `name-address:${normalizeDedupValue(company.name)}:${normalizeDedupValue(
-      company.address,
-    )}`;
+  function normalizeUrl(value: string) {
+    return value.trim().replace(/\/+$/, "").toLowerCase();
   }
 
-  function deduplicateCompanies(targetCompanies: Company[]) {
-    return mergeCompanies([], targetCompanies);
+  function normalizePhone(value: string) {
+    return value.replace(/\D/g, "");
+  }
+
+  function isSameCompany(first: Company, second: Company) {
+    if (first.placeId && second.placeId) {
+      return first.placeId === second.placeId;
+    }
+
+    const sameAddress =
+      normalizeDedupValue(first.address) === normalizeDedupValue(second.address);
+
+    if (!sameAddress) {
+      return false;
+    }
+
+    const sameWebsite = Boolean(
+      first.website &&
+        second.website &&
+        normalizeUrl(first.website) === normalizeUrl(second.website),
+    );
+    const samePhone = Boolean(
+      first.phone &&
+        second.phone &&
+        normalizePhone(first.phone) === normalizePhone(second.phone),
+    );
+    const sameName =
+      normalizeDedupValue(first.name) === normalizeDedupValue(second.name);
+
+    return sameWebsite || samePhone || sameName;
   }
 
   async function handleSearch(event: FormEvent<HTMLFormElement>) {
@@ -175,7 +233,6 @@ export default function Home() {
     setIsLoading(true);
     setError("");
     setSearched(true);
-    setNextPageToken(null);
     setHasNextPage(false);
     setResolvedQuery("");
     setRegionScope("");
@@ -189,33 +246,66 @@ export default function Home() {
       region: String(formData.get("region") || ""),
       industry: String(formData.get("industry") || ""),
     };
+    const selectedSearchSetKey = String(
+      formData.get("searchSet") || "",
+    ) as SearchSetKey;
     setKeyword(searchValues.keyword);
     setRegion(searchValues.region);
     setIndustry(searchValues.industry);
+    setSearchSetKey(selectedSearchSetKey);
 
     if (!searchValues.region) {
       setCompanies([]);
-      setNextPageToken(null);
       setHasNextPage(false);
-      setActiveSearch(null);
+      setActiveSearches([]);
       setError("地域を選択してください");
       setIsLoading(false);
       return;
     }
 
     try {
-      const payload = await fetchPlaces(searchValues);
-      setActiveSearch(searchValues);
-      setCompanies(deduplicateCompanies(payload.companies));
-      setNextPageToken(payload.nextPageToken);
-      setHasNextPage(payload.hasNextPage);
-      setResolvedQuery(payload.query);
-      setRegionScope(payload.regionScope);
+      const searchKeywords = selectedSearchSetKey
+        ? [...searchSets[selectedSearchSetKey].keywords]
+        : [searchValues.keyword];
+      let mergedCompanies: Company[] = [];
+      const completedSearches: ActiveSearch[] = [];
+      const resolvedQueries: string[] = [];
+      let resolvedRegionScope = "";
+
+      for (const searchKeyword of searchKeywords) {
+        const currentSearchValues = {
+          ...searchValues,
+          keyword: searchKeyword,
+        };
+        const payload = await fetchPlaces(currentSearchValues);
+        const companiesWithHitKeyword = payload.companies.map((company) => ({
+          ...company,
+          hitKeywords: [searchKeyword.trim() || "企業"],
+        }));
+
+        mergedCompanies = mergeCompanies(
+          mergedCompanies,
+          companiesWithHitKeyword,
+        );
+        completedSearches.push({
+          searchValues: currentSearchValues,
+          nextPageToken: payload.nextPageToken,
+        });
+        resolvedQueries.push(payload.query);
+        resolvedRegionScope = payload.regionScope;
+      }
+
+      setActiveSearches(completedSearches);
+      setCompanies(mergedCompanies);
+      setHasNextPage(
+        completedSearches.some((search) => Boolean(search.nextPageToken)),
+      );
+      setResolvedQuery(resolvedQueries.join(" / "));
+      setRegionScope(resolvedRegionScope);
     } catch (caught) {
       setCompanies([]);
-      setNextPageToken(null);
       setHasNextPage(false);
-      setActiveSearch(null);
+      setActiveSearches([]);
       setError(
         caught instanceof Error
           ? caught.message
@@ -227,7 +317,11 @@ export default function Home() {
   }
 
   async function handleLoadMore() {
-    if (!nextPageToken || !activeSearch) {
+    const searchesWithNextPage = activeSearches.filter(
+      (search) => search.nextPageToken,
+    );
+
+    if (searchesWithNextPage.length === 0) {
       return;
     }
 
@@ -235,14 +329,37 @@ export default function Home() {
     setError("");
 
     try {
-      const payload = await fetchPlaces(activeSearch, nextPageToken);
+      let additionalCompanies: Company[] = [];
+      const updatedSearches = [...activeSearches];
+
+      for (const activeSearch of searchesWithNextPage) {
+        const payload = await fetchPlaces(
+          activeSearch.searchValues,
+          activeSearch.nextPageToken || undefined,
+        );
+        const hitKeyword = activeSearch.searchValues.keyword.trim() || "企業";
+
+        additionalCompanies = mergeCompanies(
+          additionalCompanies,
+          payload.companies.map((company) => ({
+            ...company,
+            hitKeywords: [hitKeyword],
+          })),
+        );
+        const searchIndex = updatedSearches.indexOf(activeSearch);
+        updatedSearches[searchIndex] = {
+          ...activeSearch,
+          nextPageToken: payload.nextPageToken,
+        };
+      }
+
       setCompanies((currentCompanies) =>
-        mergeCompanies(currentCompanies, payload.companies),
+        mergeCompanies(currentCompanies, additionalCompanies),
       );
-      setNextPageToken(payload.nextPageToken);
-      setHasNextPage(payload.hasNextPage);
-      setResolvedQuery(payload.query);
-      setRegionScope(payload.regionScope);
+      setActiveSearches(updatedSearches);
+      setHasNextPage(
+        updatedSearches.some((search) => Boolean(search.nextPageToken)),
+      );
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -322,7 +439,9 @@ export default function Home() {
       会社名: company.name,
       住所: company.address,
       電話番号: company.phone || "",
+      "公式サイトURL": company.website || "",
       "Google Maps URL": company.googleMapsUri || "",
+      "ヒットした検索ワード": company.hitKeywords.join(" / "),
     }));
   }
 
@@ -335,7 +454,9 @@ export default function Home() {
       "会社名",
       "住所",
       "電話番号",
+      "公式サイトURL",
       "Google Maps URL",
+      "ヒットした検索ワード",
     ] as const;
     const rows = getExportRows().map((company) =>
       headers.map((header) => company[header]),
@@ -363,13 +484,22 @@ export default function Home() {
     }
 
     const worksheet = XLSX.utils.json_to_sheet(getExportRows(), {
-      header: ["会社名", "住所", "電話番号", "Google Maps URL"],
+      header: [
+        "会社名",
+        "住所",
+        "電話番号",
+        "公式サイトURL",
+        "Google Maps URL",
+        "ヒットした検索ワード",
+      ],
     });
     worksheet["!cols"] = [
       { wch: 30 },
       { wch: 50 },
       { wch: 18 },
       { wch: 70 },
+      { wch: 70 },
+      { wch: 45 },
     ];
     const workbook = XLSX.utils.book_new();
 
@@ -451,6 +581,10 @@ export default function Home() {
             : "情報なし",
       },
       { label: "電話番号", value: selectedCompany.phone || "情報なし" },
+      {
+        label: "ヒットした検索ワード",
+        value: selectedCompany.hitKeywords.join(" / ") || "情報なし",
+      },
       {
         label: "営業状態",
         value: selectedCompany.businessStatus || "情報なし",
@@ -641,7 +775,7 @@ export default function Home() {
 
         <form
           onSubmit={handleSearch}
-          className="grid gap-5 rounded-lg border border-slate-200 bg-white p-6 shadow-sm lg:grid-cols-[1.5fr_1fr_1fr_auto] lg:items-end"
+          className="grid gap-5 rounded-lg border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2 lg:grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_auto] lg:items-end"
         >
           <div>
             <label
@@ -656,9 +790,35 @@ export default function Home() {
               type="search"
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
+              disabled={Boolean(searchSetKey)}
               placeholder="例: 営業DX、採用強化、クラウド移行"
-              className="h-12 w-full rounded-md border border-slate-300 bg-white px-4 text-base text-slate-900 outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
+              className="h-12 w-full rounded-md border border-slate-300 bg-white px-4 text-base text-slate-900 outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
             />
+          </div>
+
+          <div>
+            <label
+              htmlFor="searchSet"
+              className="mb-2 block text-sm font-medium text-slate-700"
+            >
+              検索セット
+            </label>
+            <select
+              id="searchSet"
+              name="searchSet"
+              value={searchSetKey}
+              onChange={(event) =>
+                setSearchSetKey(event.target.value as SearchSetKey)
+              }
+              className="h-12 w-full rounded-md border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
+            >
+              <option value="">使用しない</option>
+              {Object.entries(searchSets).map(([key, searchSet]) => (
+                <option key={key} value={key}>
+                  {searchSet.label}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -807,6 +967,9 @@ export default function Home() {
                     </h3>
                     <p className="mt-1 text-sm leading-6 text-slate-600">
                       {company.address}
+                    </p>
+                    <p className="mt-2 text-xs leading-5 text-slate-500">
+                      ヒットした検索ワード: {company.hitKeywords.join(" / ")}
                     </p>
                   </div>
 
