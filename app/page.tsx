@@ -8,6 +8,7 @@ import {
   type CompanyEnrichment,
   type FinalAssessment,
 } from "@/services/companyResearchTypes";
+import type { FdaCompany, FdaSearchResponse } from "@/services/fdaTypes";
 
 const industries = [
   "歯科",
@@ -119,6 +120,7 @@ type ExportCompanyRow = {
 };
 
 export default function Home() {
+  const [searchSource, setSearchSource] = useState<"google" | "fda">("google");
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
   const [industry, setIndustry] = useState("");
@@ -143,8 +145,26 @@ export default function Home() {
     "すべて",
   );
   const [sortBySuitability, setSortBySuitability] = useState(true);
+  const [fdaCompanies, setFdaCompanies] = useState<FdaCompany[]>([]);
+  const [selectedFdaCompanyIds, setSelectedFdaCompanyIds] = useState<string[]>([]);
+  const [fdaPriority, setFdaPriority] = useState<"all" | "1" | "2" | "3">("all");
+  const [excludeChina, setExcludeChina] = useState(true);
+  const [fdaRecordCount, setFdaRecordCount] = useState(0);
+  const [isResearchingFda, setIsResearchingFda] = useState(false);
+  const [fdaResearchScope, setFdaResearchScope] = useState<"test" | "all">("test");
+  const [fdaResearchDataType, setFdaResearchDataType] = useState<"Import Refusal" | "Food Recall">("Import Refusal");
+  const [fdaSourceCounts, setFdaSourceCounts] = useState<FdaSearchResponse["sourceCounts"]>({
+    "Import Refusal": 0,
+    "Food Recall": 0,
+  });
+  const [importRefusalMatchCounts, setImportRefusalMatchCounts] = useState<FdaSearchResponse["importRefusalMatchCounts"]>({
+    keyword: 0,
+    product_code: 0,
+    "keyword+product_code": 0,
+  });
 
   const searchSummary = useMemo(() => {
+    if (searchSource === "fda") return "FDA公開記録の茶関連企業候補";
     return [
       searchSetKey ? searchSets[searchSetKey].label : keyword.trim() || "企業",
       industry || "指定なし",
@@ -152,7 +172,7 @@ export default function Home() {
     ]
       .filter(Boolean)
       .join(" / ");
-  }, [industry, keyword, region, searchSetKey]);
+  }, [industry, keyword, region, searchSetKey, searchSource]);
 
   const selectedCompanyCount = useMemo(() => {
     const visibleCompanyIds = new Set(companies.map((company) => company.id));
@@ -167,6 +187,21 @@ export default function Home() {
 
     return companies.filter((company) => selectedIds.has(company.id));
   }, [companies, selectedCompanyIds]);
+  const selectedFdaCompanies = useMemo(() => {
+    const selectedIds = new Set(selectedFdaCompanyIds);
+    return fdaCompanies.filter((company) => selectedIds.has(company.id));
+  }, [fdaCompanies, selectedFdaCompanyIds]);
+  const fdaWebSummary = useMemo(() => {
+    const researched = fdaCompanies.filter((company) => company.matchaStatus);
+    return {
+      total: researched.length,
+      websites: researched.filter((company) => company.officialWebsite).length,
+      confirmed: researched.filter((company) => company.matchaStatus === "confirmed").length,
+      greenTeaOnly: researched.filter((company) => company.matchaStatus === "green_tea_only").length,
+      processedOnly: researched.filter((company) => company.matchaStatus === "processed_matcha_product_only").length,
+      unconfirmed: researched.filter((company) => company.matchaStatus === "unconfirmed").length,
+    };
+  }, [fdaCompanies]);
 
   const visibleCompanies = useMemo(() => {
     const levelOrder: Record<FinalAssessment, number> = {
@@ -395,6 +430,39 @@ export default function Home() {
     setEnrichmentError("");
     resetSalesEmail();
 
+    if (searchSource === "fda") {
+      setCompanies([]);
+      setSelectedCompany(null);
+      setSelectedFdaCompanyIds([]);
+      try {
+        const params = new URLSearchParams({
+          priority: fdaPriority,
+          excludeChina: String(excludeChina),
+        });
+        const response = await fetch(`/api/fda?${params.toString()}`);
+        const payload = await response.json() as Partial<FdaSearchResponse> & { error?: string };
+        if (!response.ok || !payload.companies) {
+          throw new Error(payload.error || "FDA公開情報の取得に失敗しました。");
+        }
+        setFdaCompanies(payload.companies);
+        setFdaRecordCount(payload.recordCount ?? 0);
+        setFdaSourceCounts(payload.sourceCounts ?? { "Import Refusal": 0, "Food Recall": 0 });
+        setImportRefusalMatchCounts(payload.importRefusalMatchCounts ?? { keyword: 0, product_code: 0, "keyword+product_code": 0 });
+        setResolvedQuery("FDA茶関連候補（Import Refusal / Food Recall）");
+        setRegionScope(fdaPriority === "all" ? "全対象国" : `優先度${fdaPriority}`);
+        if (payload.warnings?.length) setError(payload.warnings.join(" / "));
+      } catch (caught) {
+        setFdaCompanies([]);
+        setFdaRecordCount(0);
+        setError(caught instanceof Error ? caught.message : "FDA公開情報の取得に失敗しました。");
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    setFdaCompanies([]);
+
     const formData = new FormData(event.currentTarget);
     const searchValues = {
       keyword: String(formData.get("keyword") || ""),
@@ -580,6 +648,39 @@ export default function Home() {
     );
   }
 
+  function toggleFdaCompanySelection(companyId: string) {
+    setSelectedFdaCompanyIds((currentIds) =>
+      currentIds.includes(companyId)
+        ? currentIds.filter((currentId) => currentId !== companyId)
+        : [...currentIds, companyId],
+    );
+  }
+
+  async function handleFdaWebResearch() {
+    const sourceCompanies = fdaCompanies.filter((company) =>
+      company.records.some((record) => record.dataType === fdaResearchDataType),
+    );
+    const targets = fdaResearchScope === "all" ? sourceCompanies : selectedFdaCompanies.slice(0, 10);
+    if (!targets.length) return;
+    setIsResearchingFda(true);
+    setError("");
+    try {
+      const response = await fetch("/api/fda/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companies: targets }),
+      });
+      const payload = await response.json() as { results?: Array<Partial<FdaCompany> & { id: string }>; error?: string };
+      if (!response.ok || !payload.results) throw new Error(payload.error || "FDA候補のWeb調査に失敗しました。");
+      const updates = new Map(payload.results.map((result) => [result.id, result]));
+      setFdaCompanies((current) => current.map((company) => ({ ...company, ...updates.get(company.id) })));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FDA候補のWeb調査に失敗しました。");
+    } finally {
+      setIsResearchingFda(false);
+    }
+  }
+
   function escapeCsvValue(value: string | number | undefined) {
     return `"${String(value ?? "").replaceAll("\"", "\"\"")}"`;
   }
@@ -620,6 +721,23 @@ export default function Home() {
   }
 
   function handleExportCsv() {
+    if (searchSource === "fda") {
+      if (!selectedFdaCompanies.length) return;
+      const headers = [
+        "企業名", "国", "所在地", "検索ソース", "FDAデータ種別", "FDA製品説明",
+        "FDA製品コード", "FDA製品コード説明", "ヒット方法", "FDA事象", "FDA日付", "FDA根拠", "FDA識別子", "ヒット語", "ヒット理由",
+        "公式サイト", "公式サイト特定方法", "公式サイト確度", "公式サイト判定根拠", "matchaStatus", "matchaEvidence", "matchaEvidenceUrl",
+      ];
+      const rows = selectedFdaCompanies.flatMap((company) => company.records.map((record) => [
+        company.name, company.country, company.address, "FDA", record.dataType, record.productDescription,
+        record.productCode || "", record.productCodeDescription || "", record.hitMethod || "keyword", record.event, record.date || "", record.evidenceUrl,
+        record.identifier || company.identifiers.join(" / "), record.hitTerms.join(" / "), record.hitReasons.join(" / "),
+        company.officialWebsite || "", company.officialWebsiteMethod || "", company.officialWebsiteConfidence || "", company.officialWebsiteReason || "",
+        company.matchaStatus || "unconfirmed", company.matchaEvidence || "", company.matchaEvidenceUrl || "",
+      ]));
+      downloadCsv(headers, rows, "fda_companies");
+      return;
+    }
     if (selectedCompanies.length === 0) {
       return;
     }
@@ -650,9 +768,11 @@ export default function Home() {
     const rows = getExportRows().map((company) =>
       headers.map((header) => company[header]),
     );
-    const csvBody = [headers, ...rows]
-      .map((row) => row.map(escapeCsvValue).join(","))
-      .join("\r\n");
+    downloadCsv([...headers], rows, "companies");
+  }
+
+  function downloadCsv(headers: readonly string[], rows: Array<Array<string | number>>, filename: string) {
+    const csvBody = [headers, ...rows].map((row) => row.map(escapeCsvValue).join(",")).join("\r\n");
     const blob = new Blob([`\uFEFF${csvBody}`], {
       type: "text/csv;charset=utf-8",
     });
@@ -660,7 +780,7 @@ export default function Home() {
     const link = document.createElement("a");
 
     link.href = url;
-    link.download = `companies_${getExportDateString()}.csv`;
+    link.download = `${filename}_${getExportDateString()}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -668,6 +788,39 @@ export default function Home() {
   }
 
   function handleExportExcel() {
+    if (searchSource === "fda") {
+      if (!selectedFdaCompanies.length) return;
+      const rows = selectedFdaCompanies.flatMap((company) => company.records.map((record) => ({
+        企業名: company.name,
+        国: company.country,
+        所在地: company.address,
+        検索ソース: "FDA",
+        "FDAデータ種別": record.dataType,
+        "FDA製品説明": record.productDescription,
+        "FDA製品コード": record.productCode || "",
+        "FDA製品コード説明": record.productCodeDescription || "",
+        "ヒット方法": record.hitMethod || "keyword",
+        "FDA事象": record.event,
+        "FDA日付": record.date || "",
+        "FDA根拠": record.evidenceUrl,
+        "FDA識別子": record.identifier || company.identifiers.join(" / "),
+        ヒット語: record.hitTerms.join(" / "),
+        ヒット理由: record.hitReasons.join(" / "),
+        公式サイト: company.officialWebsite || "",
+        公式サイト特定方法: company.officialWebsiteMethod || "",
+        公式サイト確度: company.officialWebsiteConfidence || "",
+        公式サイト判定根拠: company.officialWebsiteReason || "",
+        matchaStatus: company.matchaStatus || "unconfirmed",
+        matchaEvidence: company.matchaEvidence || "",
+        matchaEvidenceUrl: company.matchaEvidenceUrl || "",
+      })));
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      worksheet["!cols"] = [{ wch: 30 }, { wch: 20 }, { wch: 50 }, { wch: 12 }, { wch: 18 }, { wch: 80 }, { wch: 18 }, { wch: 80 }, { wch: 14 }, { wch: 70 }, { wch: 28 }, { wch: 30 }, { wch: 80 }];
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "FDA企業候補");
+      XLSX.writeFile(workbook, `fda_companies_${getExportDateString()}.xlsx`, { compression: true });
+      return;
+    }
     if (selectedCompanies.length === 0) {
       return;
     }
@@ -1099,6 +1252,26 @@ export default function Home() {
           className="grid gap-5 rounded-lg border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2 lg:grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_auto] lg:items-end"
         >
           <div>
+            <label htmlFor="searchSource" className="mb-2 block text-sm font-medium text-slate-700">
+              検索ソース
+            </label>
+            <select
+              id="searchSource"
+              value={searchSource}
+              onChange={(event) => {
+                setSearchSource(event.target.value as "google" | "fda");
+                setSelectedCompany(null);
+                setError("");
+              }}
+              className="h-12 w-full rounded-md border border-slate-300 bg-white px-3 text-base text-slate-900"
+            >
+              <option value="google">Google Places</option>
+              <option value="fda">FDA</option>
+            </select>
+          </div>
+
+          {searchSource === "google" ? <>
+          <div>
             <label
               htmlFor="keyword"
               className="mb-2 block text-sm font-medium text-slate-700"
@@ -1188,6 +1361,34 @@ export default function Home() {
             </select>
           </div>
 
+          </> : <>
+            <div>
+              <label htmlFor="fdaPriority" className="mb-2 block text-sm font-medium text-slate-700">
+                国の優先度
+              </label>
+              <select
+                id="fdaPriority"
+                value={fdaPriority}
+                onChange={(event) => setFdaPriority(event.target.value as "all" | "1" | "2" | "3")}
+                className="h-12 w-full rounded-md border border-slate-300 bg-white px-3 text-base text-slate-900"
+              >
+                <option value="all">すべて</option>
+                <option value="1">優先1（USA・EU）</option>
+                <option value="2">優先2（タイ・韓国・台湾）</option>
+                <option value="3">優先3（インド・ベトナム）</option>
+              </select>
+            </div>
+            <label className="flex h-12 items-center gap-2 text-sm font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={excludeChina}
+                onChange={(event) => setExcludeChina(event.target.checked)}
+                className="h-4 w-4 accent-teal-700"
+              />
+              中国を除外
+            </label>
+          </>}
+
           <button
             type="submit"
             disabled={isLoading || isEnriching}
@@ -1207,17 +1408,18 @@ export default function Home() {
             </div>
             <div className="flex flex-col gap-1 sm:items-end">
               <p className="text-sm font-semibold text-slate-600">
-                {companies.length}件 / 次ページ
-                {hasNextPage ? "あり" : "なし"}
+                {searchSource === "fda"
+                  ? `${fdaCompanies.length}社 / ${fdaRecordCount}記録`
+                  : `${companies.length}件 / 次ページ${hasNextPage ? "あり" : "なし"}`}
               </p>
               <div className="flex flex-wrap items-center gap-3 sm:justify-end">
                 <p className="text-sm font-semibold text-teal-700">
-                  {selectedCompanyCount}件選択中
+                  {searchSource === "fda" ? selectedFdaCompanies.length : selectedCompanyCount}件選択中
                 </p>
                 <button
                   type="button"
                   onClick={handleExportCsv}
-                  disabled={selectedCompanies.length === 0}
+                  disabled={searchSource === "fda" ? selectedFdaCompanies.length === 0 : selectedCompanies.length === 0}
                   className="h-9 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
                 >
                   CSV出力
@@ -1225,7 +1427,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleExportExcel}
-                  disabled={selectedCompanies.length === 0}
+                  disabled={searchSource === "fda" ? selectedFdaCompanies.length === 0 : selectedCompanies.length === 0}
                   className="h-9 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
                 >
                   Excel出力
@@ -1234,7 +1436,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="mb-4 flex flex-wrap items-end gap-4 rounded-md border border-slate-200 bg-white p-4">
+          {searchSource === "google" ? <div className="mb-4 flex flex-wrap items-end gap-4 rounded-md border border-slate-200 bg-white p-4">
             <label className="grid gap-1 text-sm font-medium text-slate-700">
               最終判定で絞り込み
               <select
@@ -1265,7 +1467,46 @@ export default function Home() {
                 公式サイトを調査中…（検索結果は先に利用できます）
               </p>
             ) : null}
-          </div>
+          </div> : (
+            <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              FDA公開記録に登場した候補です。FDA承認・FDA適合・現在違反中を意味しません。
+              Import Refusal {fdaSourceCounts["Import Refusal"]}件 / Food Recall {fdaSourceCounts["Food Recall"]}件
+              <span className="ml-2">（Import Refusal: 文字列のみ {importRefusalMatchCounts.keyword} / Product Codeのみ {importRefusalMatchCounts.product_code} / 両方 {importRefusalMatchCounts["keyword+product_code"]}）</span>
+              <button
+                type="button"
+                onClick={handleFdaWebResearch}
+                disabled={isResearchingFda || (fdaResearchScope === "test" && selectedFdaCompanies.length === 0)}
+                className="ml-3 rounded-md border border-amber-400 bg-white px-3 py-1 font-semibold disabled:opacity-50"
+              >
+                {isResearchingFda ? "Web調査中…" : "FDA候補をWeb調査"}
+              </button>
+              <select
+                value={fdaResearchScope}
+                onChange={(event) => setFdaResearchScope(event.target.value as "test" | "all")}
+                disabled={isResearchingFda}
+                className="ml-2 rounded-md border border-amber-400 bg-white px-2 py-1"
+                aria-label="FDA Web調査範囲"
+              >
+                <option value="test">テスト：選択した最大10社</option>
+                <option value="all">全件調査：選択データ種別の全候補</option>
+              </select>
+              <select
+                value={fdaResearchDataType}
+                onChange={(event) => setFdaResearchDataType(event.target.value as "Import Refusal" | "Food Recall")}
+                disabled={isResearchingFda}
+                className="ml-2 rounded-md border border-amber-400 bg-white px-2 py-1"
+                aria-label="FDA Web調査データ種別"
+              >
+                <option value="Import Refusal">Import Refusal</option>
+                <option value="Food Recall">Food Recall</option>
+              </select>
+              {fdaWebSummary.total ? (
+                <span className="ml-2">
+                  Web調査 {fdaWebSummary.total}社 / 公式サイト {fdaWebSummary.websites} / confirmed {fdaWebSummary.confirmed} / green tea only {fdaWebSummary.greenTeaOnly} / processed only {fdaWebSummary.processedOnly} / unconfirmed {fdaWebSummary.unconfirmed}
+                </span>
+              ) : null}
+            </div>
+          )}
 
           {enrichmentError ? (
             <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
@@ -1284,7 +1525,7 @@ export default function Home() {
               <p>
                 地域範囲:{" "}
                 <span className="font-semibold text-slate-900">
-                  {regionScope || region}
+                  {regionScope || (searchSource === "google" ? region : "全対象国")}
                 </span>
               </p>
             </div>
@@ -1297,7 +1538,50 @@ export default function Home() {
           ) : null}
 
           <div className="grid gap-3">
-            {visibleCompanies.map((company) => {
+            {searchSource === "fda" ? fdaCompanies.map((company) => {
+              const isSelected = selectedFdaCompanyIds.includes(company.id);
+              return (
+                <article key={company.id} className={`rounded-lg border bg-white p-5 shadow-sm ${isSelected ? "border-teal-300 ring-1 ring-teal-100" : "border-slate-200"}`}>
+                  <div className="flex items-start gap-4">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleFdaCompanySelection(company.id)}
+                      aria-label={`${company.name}を選択`}
+                      className="mt-1 h-5 w-5 accent-teal-700"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-lg font-semibold text-slate-950">{company.name}</h3>
+                        {company.priority ? <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">優先{company.priority}</span> : null}
+                      </div>
+                      <p className="mt-1 text-sm text-slate-600">{company.address || "所在地未取得"}</p>
+                      <p className="mt-1 text-xs text-slate-500">国: {company.country}（{company.countryBasis === "manufacturer/origin" ? "製造者・原産国" : "recalling firm所在地"}）</p>
+                      <p className="mt-2 text-sm text-slate-700">ヒット語: {company.hitTerms.join(" / ")}</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">{company.hitReasons[0]}</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-800">
+                        matcha判定: {company.matchaStatus || "未調査"}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">{company.matchaEvidence || "Web調査未実施"}</p>
+                      {company.officialWebsite ? <a href={company.officialWebsite} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs font-semibold text-teal-700">公式サイト候補（{company.officialWebsiteMethod === "web_search" ? "Web検索" : "Google Places"} / {company.officialWebsiteConfidence}）</a> : null}
+                      {company.matchaEvidenceUrl ? <a href={company.matchaEvidenceUrl} target="_blank" rel="noreferrer" className="ml-3 mt-1 inline-block text-xs font-semibold text-teal-700">抹茶根拠</a> : null}
+                      <div className="mt-4 grid gap-3">
+                        {company.records.map((record) => (
+                          <div key={record.id} className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+                            <p className="font-semibold text-slate-900">{record.dataType} / {record.date || "日付不明"}</p>
+                            <p className="mt-1 text-slate-700">{record.productDescription}</p>
+                            <p className="mt-1 text-xs text-slate-500">製品コード: {record.productCode || "なし"} / 識別子: {record.identifier || "なし"}</p>
+                            {record.dataType === "Import Refusal" ? <p className="mt-1 text-xs text-slate-500">ヒット方法: {record.hitMethod} / コード説明: {record.productCodeDescription || "なし"}</p> : null}
+                            <p className="mt-2 text-xs leading-5 text-slate-600">FDA上の事象: {record.event || "詳細なし"}</p>
+                            <a href={record.evidenceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs font-semibold text-teal-700 hover:text-teal-900">FDA根拠</a>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            }) : visibleCompanies.map((company) => {
               const isSelected = selectedCompanyIds.includes(company.id);
 
               return (
@@ -1420,13 +1704,14 @@ export default function Home() {
             })}
           </div>
 
-          {!isLoading && searched && !error && companies.length === 0 ? (
+          {!isLoading && searched && !error
+            && (searchSource === "fda" ? fdaCompanies.length === 0 : companies.length === 0) ? (
             <p className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
               条件に合う企業が見つかりませんでした。
             </p>
           ) : null}
 
-          {searched && hasNextPage ? (
+          {searchSource === "google" && searched && hasNextPage ? (
             <div className="mt-5 flex justify-center">
               <button
                 type="button"

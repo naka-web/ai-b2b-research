@@ -971,3 +971,59 @@ export async function enrichCompanies(companies: CompanyEnrichmentCandidate[], c
   await Promise.all(Array.from({ length: Math.min(concurrency, companies.length) }, worker));
   return results;
 }
+
+export async function inspectWebsiteForFdaMatcha(website: string) {
+  const { pages, retrievalStatus } = await inspectWebsite(website);
+  const processedPattern = /(?:matcha.{0,70}(?:flavou?r|cookie|cake|ice cream|latte|candy|chocolate|snack|dessert|mask|skin care|cosmetic|clay)|(?:flavou?r|cookie|cake|ice cream|latte|candy|chocolate|snack|dessert|mask|skin care|cosmetic|clay).{0,70}matcha)/i;
+  const directPattern = /(?:matcha powder|green tea powder|japanese matcha|ceremonial matcha|culinary matcha|organic matcha|pure matcha|matcha tea)/i;
+  const matchaPages = pages.filter((page) => /\bmatcha\b/i.test(`${page.title} ${page.headings} ${page.text}`));
+  const isProcessedPage = (page: PageSnapshot) => {
+    const text = `${page.title} ${page.headings} ${page.text}`;
+    return processedPattern.test(text) || /(?:ice-?cream|mochi|cookie|cake|latte|mask|skin-care|cosmetic|clay)/i.test(`${page.title} ${page.url}`);
+  };
+  const directPage = matchaPages.find((page) => {
+    const text = `${page.title} ${page.headings} ${page.text}`;
+    return directPattern.test(text) && !isProcessedPage(page);
+  });
+  if (directPage) {
+    return {
+      status: "confirmed" as const,
+      evidence: evidenceExcerpt(`${directPage.title} ${directPage.headings} ${directPage.text}`, directPattern),
+      evidenceUrl: directPage.url,
+      retrievalStatus,
+    };
+  }
+  const processedPage = matchaPages.find(isProcessedPage);
+  if (processedPage) {
+    return {
+      status: "processed_matcha_product_only" as const,
+      evidence: evidenceExcerpt(`${processedPage.title} ${processedPage.headings} ${processedPage.text}`, processedPattern),
+      evidenceUrl: processedPage.url,
+      retrievalStatus,
+    };
+  }
+  const greenTeaPage = pages.find((page) => /\bgreen tea\b/i.test(`${page.title} ${page.headings} ${page.text}`));
+  if (greenTeaPage) {
+    return {
+      status: "green_tea_only" as const,
+      evidence: evidenceExcerpt(`${greenTeaPage.title} ${greenTeaPage.headings} ${greenTeaPage.text}`, /\bgreen tea\b/i),
+      evidenceUrl: greenTeaPage.url,
+      retrievalStatus,
+    };
+  }
+  return {
+    status: "unconfirmed" as const,
+    evidence: matchaPages.length
+      ? "matchaへの言及は確認しましたが、抹茶そのもの／粉末または加工商品の種別を確定できませんでした。"
+      : "調査した公式サイトページでmatcha・green teaの取扱根拠を確認できませんでした。",
+    evidenceUrl: matchaPages[0]?.url,
+    retrievalStatus,
+  };
+}
+
+function evidenceExcerpt(text: string, pattern: RegExp) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const match = normalized.match(pattern);
+  if (!match || match.index === undefined) return normalized.slice(0, 240);
+  return normalized.slice(Math.max(0, match.index - 80), Math.min(normalized.length, match.index + match[0].length + 120));
+}
