@@ -15,6 +15,7 @@ import type {
 } from "@/services/companyResearchTypes";
 
 const MAX_PAGES_PER_COMPANY = 8;
+const MAX_EXTERNAL_STORE_PAGES = 3;
 const REQUEST_TIMEOUT_MS = 3_500;
 const MAX_HTML_BYTES = 1_000_000;
 const MAX_REDIRECTS = 3;
@@ -70,6 +71,10 @@ const priorityProductSignals = [
   "products", "product", "item", "shop",
 ] as const;
 const searchSignals = ["サイト内検索", "search", "商品検索"] as const;
+const externalStoreSignals = [
+  "online shop", "online store", "オンラインショップ", "オンラインストア",
+  "公式ショップ", "商品購入", "通販", "ec shop", "ecサイト",
+] as const;
 const contactSignals = [
   "法人お問い合わせ", "業務用お問い合わせ", "お問い合わせ", "問い合わせ",
   "資料請求", "contact us", "contact", "inquiry",
@@ -318,8 +323,10 @@ function pageLinks(html: string, pageUrl: string): PageLink[] {
       if (!["http:", "https:"].includes(url.protocol) || excludedFiles.test(url.pathname)) continue;
       const label = htmlToText(match[2]);
       const sameHost = normalizeHostname(page.hostname) === normalizeHostname(url.hostname);
-      const storeLink = [...productSignals, ...priorityProductSignals]
-        .some((term) => normalizeText(`${label} ${url}`).includes(term));
+      const normalizedLabel = normalizeText(label);
+      const storeLink = externalStoreSignals
+        .some((term) => normalizeText(`${label} ${url}`).includes(term))
+        || /^(?:shop|store|ec)$/.test(normalizedLabel);
       const allowsExternalStore = !sameHost && storeLink && !excludedHost(url.hostname);
       if (!sameHost && !allowsExternalStore) continue;
       const score = linkScore(`${label} ${url}`);
@@ -389,6 +396,26 @@ function signalHasNearbyContext(text: string, signal: string, contextTerms: stri
   return false;
 }
 
+function hasBtoBEvidenceInPageContent(page: PageSnapshot) {
+  const withoutChrome = page.html
+    .replace(/<(header|nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, " ");
+  const text = normalizeText(`${page.title} ${htmlToText(withoutChrome)}`);
+  if (veryStrongSignals.some(([, pattern]) => pattern.test(text))) return true;
+  return b2bPositiveSignals.some(([term]) => {
+    if (!containsSignal(text, term)) return false;
+    if (
+      (term === "原料" || term === "原材料")
+      && !signalHasNearbyContext(text, term, ["業務用", "供給", "卸", "oem", "メーカー向け"])
+    ) return false;
+    if (
+      term === "法人向け"
+      && signalHasNearbyContext(text, term, ["ギフト", "記念品", "贈答", "大量注文", "お菓子"])
+    ) return false;
+    return true;
+  });
+}
+
 function assessBtoB(pages: PageSnapshot[]) {
   const matches = new Map<string, { weight: number; urls: Set<string> }>();
   const veryStrongMatches = new Map<string, { weight: number; urls: Set<string> }>();
@@ -451,10 +478,14 @@ function assessBtoB(pages: PageSnapshot[]) {
     reasons.push(`その他の法人取引語: ${[...matches.keys()].slice(0, 10).join("、")}`);
   }
   if (negatives.size) reasons.push(`消費者向け業態の記載も確認: ${[...negatives.keys()].join("、")}`);
-  const urls = new Set<string>();
-  veryStrongMatches.forEach((match) => match.urls.forEach((url) => urls.add(url)));
-  matches.forEach((match) => match.urls.forEach((url) => urls.add(url)));
-  negatives.forEach((values) => values.forEach((url) => urls.add(url)));
+  const matchedUrls = new Set<string>();
+  veryStrongMatches.forEach((match) => match.urls.forEach((url) => matchedUrls.add(url)));
+  matches.forEach((match) => match.urls.forEach((url) => matchedUrls.add(url)));
+  const pagesByUrl = new Map(pages.map((page) => [page.url, page]));
+  const urls = [...matchedUrls].filter((url) => {
+    const page = pagesByUrl.get(url);
+    return page ? hasBtoBEvidenceInPageContent(page) : false;
+  });
   const evidenceLabels = [
     ...veryStrongMatches.keys(),
     ...[...matches.keys()].filter((label) => !veryStrongMatches.has(label)),
@@ -476,7 +507,7 @@ function assessBtoB(pages: PageSnapshot[]) {
     positiveScore: positive,
     negativeScore,
     reasons,
-    urls: [...urls],
+    urls,
     evidenceLabels,
     businessTypes,
   };
@@ -498,6 +529,16 @@ function assessDirectMatchaBtoB(pages: PageSnapshot[]) {
     urls: [...urls],
     score: labels.size ? Math.min(50, 35 + (labels.size - 1) * 5) : 0,
   };
+}
+
+function hasTeaLinkedWholesaleEvidence(pages: PageSnapshot[], evidenceLabels: string[]) {
+  if (evidenceLabels.some((label) => label === "茶卸" || /抹茶.{0,4}(?:卸|問屋)/.test(label))) {
+    return true;
+  }
+  return pages.some((page) => {
+    const text = normalizeText(`${page.title} ${page.headings} ${page.text}`);
+    return /(?:日本茶|緑茶|茶葉|茶原料|茶商品).{0,40}(?:商社|卸売|卸|問屋)|(?:商社|卸売|卸|問屋).{0,40}(?:日本茶|緑茶|茶葉|茶原料|茶商品)/.test(text);
+  });
 }
 
 function strongMatchaPage(page: PageSnapshot) {
@@ -577,13 +618,19 @@ function assessMatcha(pages: PageSnapshot[]) {
     const url = normalizeText(page.url);
     const matchaAsPrimaryHeading = /^(?:抹茶|matcha)(?:\s|[|｜:：\-]|$)/i.test(title)
       || /^(?:抹茶|matcha)(?:\s|[|｜:：\-]|$)/i.test(headings);
+    const standaloneMatchaStoreTitle = externalStoreSignals.some((term) => title.includes(term))
+      && /(?:^|[|｜])[^|｜]{0,40}(?:宇治|有機|オーガニック)?抹茶(?:[|｜]|$)/i.test(title)
+      && !finishedProductPattern.test(title);
     const categoryUrl = /\/(?:category|categories|collection|collections|products?|items?|shop)\/[^?#]*matcha(?:[/?#]|$)/i.test(url);
     const standaloneProductNames = page.links.filter((link) => {
       const label = normalizeText(link.label);
       return /(?:宇治|西尾|有機|オーガニック|[一-龠々ヶ]{2,})抹茶(?:\s|$)/i.test(label)
         && !finishedProductPattern.test(label);
     }).length;
-    return matchaAsPrimaryHeading || categoryUrl || standaloneProductNames >= 2;
+    const officialStoreProduct = standaloneProductNames >= 1
+      && externalStoreSignals.some((term) => normalizeText(`${title} ${headings}`).includes(term));
+    return matchaAsPrimaryHeading || standaloneMatchaStoreTitle || categoryUrl
+      || standaloneProductNames >= 2 || officialStoreProduct;
   };
   const standaloneProducts = mentions.filter(
     (page) =>
@@ -676,6 +723,7 @@ async function inspectWebsite(website: string) {
   const visited = new Set([firstPage.url]);
   const trustedHosts = new Set([normalizeHostname(new URL(firstPage.url).hostname)]);
   const queue = [...firstPage.links];
+  const officialEntryPages = [firstPage];
 
   const siteRoot = new URL("/", firstPage.url).toString();
   if (siteRoot !== firstPage.url) {
@@ -685,8 +733,46 @@ async function inspectWebsite(website: string) {
       visited.add(response.url);
       const rootPage = parsePage(response.html, response.url);
       pages.push(rootPage);
+      officialEntryPages.push(rootPage);
       queue.push(...rootPage.links);
     } catch { /* the supplied page can still be assessed */ }
+  }
+
+  const externalStoreCandidates = officialEntryPages
+    .flatMap((page) => page.links)
+    .filter((link) => link.allowsExternalStore)
+    .sort((a, b) => b.score - a.score);
+  const externalStore = externalStoreCandidates[0];
+  if (externalStore) {
+    const storeHost = normalizeHostname(new URL(externalStore.url).hostname);
+    trustedHosts.add(storeHost);
+    const storeQueue = [externalStore];
+    let storePages = 0;
+    while (storePages < MAX_EXTERNAL_STORE_PAGES && storeQueue.length) {
+      const storeLinkScore = (link: PageLink) => {
+        const label = normalizeText(link.label);
+        const standaloneMatcha = !searchSignals.some((term) => label.includes(term))
+          && /(?:^|\s)(?:[一-龠々ヶァ-ヶーa-z0-9.]+\s+)?(?:宇治|有機|オーガニック)?抹茶(?:\s|$)|matcha powder/i.test(label);
+        return link.score + (standaloneMatcha ? 500 : 0);
+      };
+      storeQueue.sort((a, b) => storeLinkScore(b) - storeLinkScore(a));
+      const link = storeQueue.shift();
+      if (!link || visited.has(link.url)) continue;
+      if (normalizeHostname(new URL(link.url).hostname) !== storeHost) continue;
+      visited.add(link.url);
+      try {
+        const response = await fetchHtml(link.url);
+        if (visited.has(response.url) && response.url !== link.url) continue;
+        visited.add(response.url);
+        const storePage = parsePage(response.html, response.url);
+        pages.push(storePage);
+        storePages += 1;
+        storeQueue.push(...storePage.links.filter((child) =>
+          normalizeHostname(new URL(child.url).hostname) === storeHost
+          && (child.score > 0 || /抹茶|matcha/i.test(child.label)),
+        ));
+      } catch { /* continue with the next product-oriented store page */ }
+    }
   }
 
   if (assessMatcha(pages).status !== "確認済み") {
@@ -803,12 +889,13 @@ export async function enrichCompany(company: CompanyEnrichmentCandidate): Promis
     const directContribution = clearMatcha
       ? Math.min(direct.score, 100 - matchaContribution - b2bContribution)
       : 0;
+    const directlyLinked = direct.labels.some((label) =>
+      /業務用抹茶|抹茶卸・問屋|法人向け抹茶|抹茶原料供給|用途別抹茶|抹茶OEM・PB|抹茶バルク販売/.test(label),
+    );
+    const teaLinkedWholesale = hasTeaLinkedWholesaleEvidence(pages, b2b.evidenceLabels);
     const combinationEligible = clearMatcha
       && ["抹茶そのもの／茶商品", "抹茶原料", "業務用抹茶"].includes(matcha.type)
-      && b2b.evidenceLabels.some((label) => /商社|卸|問屋/.test(label));
-    const directlyLinked = direct.labels.some((label) =>
-      /業務用抹茶|抹茶卸・問屋|法人向け抹茶|抹茶原料供給/.test(label),
-    );
+      && (directlyLinked || teaLinkedWholesale);
     const combinationContribution = combinationEligible ? (directlyLinked ? 30 : 25) : 0;
     const totalScore = Math.min(100, matchaContribution + b2bContribution + directContribution + combinationContribution);
     let final: FinalAssessment;
