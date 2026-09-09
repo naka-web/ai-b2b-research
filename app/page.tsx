@@ -2,6 +2,7 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import Link from "next/link";
 import {
   createPendingEnrichment,
   type Company,
@@ -1245,6 +1246,9 @@ export default function Home() {
           <h1 className="text-3xl font-semibold tracking-normal text-slate-950">
             AI企業リサーチ
           </h1>
+          <Link href="/overseas" className="mt-3 inline-block text-sm font-medium text-emerald-800 underline">
+            海外企業調査（手動入力）へ
+          </Link>
         </div>
 
         <form
