@@ -33,6 +33,20 @@ test('delivery and internal export tables use the requested columns',()=>{
   assert.ok(data.evidence.headers.includes('原文・元データ'));
 });
 
+for (const [label, companyRoles, expected] of [
+  ['undefined', undefined, '未確認'],
+  ['null', null, '未確認'],
+  ['empty', [], '未確認'],
+  ['unknown only', [{role:'unknown',evidenceUrl:null,evidenceText:null}], '未確認'],
+  ['known roles', [{role:'wholesaler',evidenceUrl:null,evidenceText:null},{role:'supplier',evidenceUrl:null,evidenceText:null}], 'wholesaler\nsupplier'],
+]) test(`legacy companyRoles ${label} remains exportable`,()=>{
+  const value=confirmed(`roles-${label.replaceAll(' ','-')}`); value.companyRoles=companyRoles;
+  const data=buildExportPackage([value]); const roleIndex=data.delivery.headers.indexOf('企業属性');
+  assert.equal(data.delivery.rows[0][roleIndex],expected);
+  assert.doesNotThrow(()=>createDeliveryCsv(data));
+  assert.doesNotThrow(()=>XLSX.read(createDeliveryWorkbook(data),{type:'array'}));
+});
+
 test('workbook contains delivery, internal, and evidence sheets with filters',()=>{
   const bytes=createDeliveryWorkbook(buildExportPackage([confirmed()])); const workbook=XLSX.read(bytes,{type:'array',cellDates:true});
   assert.deepEqual(workbook.SheetNames,['提出用','内部チェック用','出典・根拠一覧']);

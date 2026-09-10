@@ -36,22 +36,24 @@ export const EVIDENCE_HEADERS = [
 
 type ExportGroup = { company: OverseasCompany; sourceIds: string[] };
 
+const items = <T>(value: T[] | null | undefined): T[] => value ?? [];
+
 const unique = <T>(items: T[], key: (item: T) => string) => {
   const seen = new Set<string>();
   return items.filter(item => { const value = key(item); if (seen.has(value)) return false; seen.add(value); return true; });
 };
 
 function completeness(company: OverseasCompany) {
-  return Number(company.identityConfirmed) * 20 + company.evidence.length * 3 + company.evidenceSummaries.length * 2 +
-    company.products.length * 4 + (company.discoveryEvidence?.length || 0) * 3 + company.emails.length * 2 + company.phones.length +
+  return Number(company.identityConfirmed) * 20 + items(company.evidence).length * 3 + items(company.evidenceSummaries).length * 2 +
+    items(company.products).length * 4 + items(company.discoveryEvidence).length * 3 + items(company.emails).length * 2 + items(company.phones).length +
     Number(Boolean(company.contactFormUrl)) * 2 + Number(company.status === '完了') * 5;
 }
 
 function mergeCompanies(left: OverseasCompany, right: OverseasCompany): OverseasCompany {
   const primary = completeness(right) > completeness(left) ? right : left;
   const secondary = primary === left ? right : left;
-  const emails = unique([...primary.emails, ...secondary.emails, ...(primary.email ? [primary.email] : []), ...(secondary.email ? [secondary.email] : [])], value => value.toLowerCase());
-  const phones = unique([...primary.phones, ...secondary.phones], value => value.replace(/\D/g, ''));
+  const emails = unique([...items(primary.emails), ...items(secondary.emails), ...(primary.email ? [primary.email] : []), ...(secondary.email ? [secondary.email] : [])], value => value.toLowerCase());
+  const phones = unique([...items(primary.phones), ...items(secondary.phones)], value => value.replace(/\D/g, ''));
   return {
     ...primary,
     legalName: primary.legalName || secondary.legalName,
@@ -61,15 +63,15 @@ function mergeCompanies(left: OverseasCompany, right: OverseasCompany): Overseas
     emails,
     email: emails[0] || null,
     contactFormUrl: primary.contactFormUrl || secondary.contactFormUrl,
-    companyRoles: unique([...primary.companyRoles, ...secondary.companyRoles], item => `${item.role}|${item.evidenceUrl || ''}|${item.evidenceText || ''}`),
-    products: unique([...primary.products, ...secondary.products], item => `${item.url}|${item.name}|${item.kind}`),
-    suppliers: unique([...primary.suppliers, ...secondary.suppliers], item => `${item.name}|${item.relationship}|${item.productId || ''}`),
-    b2bEvidenceIds: unique([...primary.b2bEvidenceIds, ...secondary.b2bEvidenceIds], String),
-    evidence: unique([...primary.evidence, ...secondary.evidence], item => `${item.field}|${item.url}|${item.quote}`),
-    evidenceSummaries: unique([...primary.evidenceSummaries, ...secondary.evidenceSummaries], item => `${item.category}|${item.sourceUrl || ''}|${item.originalText}`),
-    discoveryEvidence: unique([...(primary.discoveryEvidence || []), ...(secondary.discoveryEvidence || [])], item => JSON.stringify(item)),
-    warnings: unique([...primary.warnings, ...secondary.warnings], String),
-    reasons: unique([...primary.reasons, ...secondary.reasons], String),
+    companyRoles: unique([...items(primary.companyRoles), ...items(secondary.companyRoles)], item => `${item.role}|${item.evidenceUrl || ''}|${item.evidenceText || ''}`),
+    products: unique([...items(primary.products), ...items(secondary.products)], item => `${item.url}|${item.name}|${item.kind}`),
+    suppliers: unique([...items(primary.suppliers), ...items(secondary.suppliers)], item => `${item.name}|${item.relationship}|${item.productId || ''}`),
+    b2bEvidenceIds: unique([...items(primary.b2bEvidenceIds), ...items(secondary.b2bEvidenceIds)], String),
+    evidence: unique([...items(primary.evidence), ...items(secondary.evidence)], item => `${item.field}|${item.url}|${item.quote}`),
+    evidenceSummaries: unique([...items(primary.evidenceSummaries), ...items(secondary.evidenceSummaries)], item => `${item.category}|${item.sourceUrl || ''}|${item.originalText}`),
+    discoveryEvidence: unique([...items(primary.discoveryEvidence), ...items(secondary.discoveryEvidence)], item => JSON.stringify(item)),
+    warnings: unique([...items(primary.warnings), ...items(secondary.warnings)], String),
+    reasons: unique([...items(primary.reasons), ...items(secondary.reasons)], String),
   };
 }
 
@@ -105,10 +107,10 @@ const lines = (values: Array<string | null | undefined>) => unique(values.filter
 const dateCell = (value: string | null | undefined): Date | string | null => {
   if (!value) return null; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed;
 };
-const roles = (company: OverseasCompany) => lines(company.companyRoles.filter(item => item.role !== 'unknown').map(item => item.role)) || '未確認';
-const officialEvidence = (company: OverseasCompany) => company.evidence || [];
-const tradeEvidence = (company: OverseasCompany) => company.discoveryEvidence || [];
-const summaries = (company: OverseasCompany) => company.evidenceSummaries || [];
+const roles = (company: OverseasCompany) => lines(items(company.companyRoles).filter(item => item.role !== 'unknown').map(item => item.role)) || '未確認';
+const officialEvidence = (company: OverseasCompany) => items(company.evidence);
+const tradeEvidence = (company: OverseasCompany) => items(company.discoveryEvidence);
+const summaries = (company: OverseasCompany) => items(company.evidenceSummaries);
 
 export function matchaDisplay(status: ScreeningStatus) {
   return ({
@@ -124,19 +126,19 @@ export function matchaDisplay(status: ScreeningStatus) {
 }
 
 function japaneseOrigin(company: OverseasCompany) {
-  if (company.products.some(product => product.kind === '抹茶原料・茶商品' && product.origin === 'JP')) return '日本産確認済み';
-  if (company.products.some(product => product.origin === 'CN' || product.origin === 'OTHER')) return '他国産あり／日本産未確認';
+  if (items(company.products).some(product => product.kind === '抹茶原料・茶商品' && product.origin === 'JP')) return '日本産確認済み';
+  if (items(company.products).some(product => product.origin === 'CN' || product.origin === 'OTHER')) return '他国産あり／日本産未確認';
   return '未確認';
 }
 
 function productType(company: OverseasCompany) {
-  const raw = company.products.some(product => product.kind === '抹茶原料・茶商品');
-  const processed = company.products.some(product => product.kind === '加工品');
+  const raw = items(company.products).some(product => product.kind === '抹茶原料・茶商品');
+  const processed = items(company.products).some(product => product.kind === '加工品');
   return raw && processed ? 'raw_matcha / processed_matcha' : raw ? 'raw_matcha' : processed ? 'processed_matcha' : '未確認';
 }
 
 function b2bStatus(company: OverseasCompany) {
-  if (company.b2bEvidenceIds.length) return '確認済み';
+  if (items(company.b2bEvidenceIds).length) return '確認済み';
   return missing(company.screeningStatus === 'fetch_failed');
 }
 
@@ -145,7 +147,7 @@ function contactValue(value: string, company: OverseasCompany) {
 }
 
 function importExport(company: OverseasCompany) {
-  const official = company.companyRoles.filter(item => ['importer', 'distributor', 'wholesaler', 'supplier'].includes(item.role)).map(item => `公式サイト確認: ${item.role}`);
+  const official = items(company.companyRoles).filter(item => ['importer', 'distributor', 'wholesaler', 'supplier'].includes(item.role)).map(item => `公式サイト確認: ${item.role}`);
   const trade = tradeEvidence(company).map(item => `Trade記録上: ${item.role}`);
   return lines([...official, ...trade]) || '未確認';
 }
@@ -182,14 +184,14 @@ function tradeSummary(company: OverseasCompany, index: number, sourceUrl: string
 
 function deliveryRow(company: OverseasCompany, index: number): ExportCell[] {
   const suppliers = japaneseOrigin(company) === '日本産確認済み'
-    ? lines(company.suppliers.map(item => `${item.name}（${item.relationship}）`)) || '未確認' : '未確認';
+    ? lines(items(company.suppliers).map(item => `${item.name}（${item.relationship}）`)) || '未確認' : '未確認';
   return [
     index + 1, countryProfiles[company.country].label, company.legalName || company.name, company.address || '未確認', company.website,
-    contactValue(lines(company.emails.length ? company.emails : company.email ? [company.email] : []), company),
-    contactValue(company.contactFormUrl || '', company), contactValue(lines(company.phones), company), '未確認', roles(company),
+    contactValue(lines(items(company.emails).length ? items(company.emails) : company.email ? [company.email] : []), company),
+    contactValue(company.contactFormUrl || '', company), contactValue(lines(items(company.phones)), company), '未確認', roles(company),
     matchaDisplay(company.screeningStatus), b2bStatus(company), importExport(company), japaneseOrigin(company), suppliers,
     lines(tradeEvidence(company).map(item => item.hsCode)) || '', lines(tradeEvidence(company).map(item => item.productDescription)) || '',
-    sources(company), sourceUrls(company), lines([...company.reasons, ...company.warnings]) || '',
+    sources(company), sourceUrls(company), lines([...items(company.reasons), ...items(company.warnings)]) || '',
   ];
 }
 
@@ -201,8 +203,8 @@ function internalRow(group: ExportGroup, records: TradeScreeningRecord[]): Expor
     screening?.candidateWebsiteStatus || '未確認', company.identityConfirmed ? 'confirmed' : 'unconfirmed',
     lines([screening?.candidateWebsiteIdentityEvidence?.url, ...identity.map(item => item.url)]) || '未確認',
     lines([screening?.candidateWebsiteIdentityEvidence?.text, ...identity.map(item => item.quote)]) || '未確認',
-    company.screeningStatus, productType(company), japaneseOrigin(company), company.b2bEvidenceIds.length ? 'confirmed' : 'unconfirmed', roles(company),
-    contactValue(lines(company.emails), company), contactValue(company.contactFormUrl || '', company), contactValue(lines(company.phones), company),
+    company.screeningStatus, productType(company), japaneseOrigin(company), items(company.b2bEvidenceIds).length ? 'confirmed' : 'unconfirmed', roles(company),
+    contactValue(lines(items(company.emails)), company), contactValue(company.contactFormUrl || '', company), contactValue(lines(items(company.phones)), company),
     company.contactStatus, company.screeningStatus, company.isQualifiedLead, company.assessment || '未確認',
     dateCell(company.screenedAt), lines(['manual', ...trade.map(item => item.source)]),
     lines(trade.map(item => item.hsCode)), lines(trade.map(item => item.productDescription)), lines(trade.map(item => item.role)),
@@ -210,7 +212,7 @@ function internalRow(group: ExportGroup, records: TradeScreeningRecord[]): Expor
     lines(trade.map(item => item.exporterName)), lines(trade.map(item => item.shipmentDate)), lines(trade.map(item => item.quantity)),
     lines(trade.map(item => item.unit)), lines(trade.map(item => item.billOfLading)), '', sourceUrls(company),
     lines([...officialEvidence(company).map(item => item.quote), ...trade.map(item => item.rawEvidence || item.productDescription)]),
-    lines(allSummaries.map(item => item.japaneseSummary)), company.status, lines([...company.reasons, ...company.warnings]),
+    lines(allSummaries.map(item => item.japaneseSummary)), company.status, lines([...items(company.reasons), ...items(company.warnings)]),
   ];
 }
 
