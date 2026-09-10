@@ -31,7 +31,8 @@ test('HS codes and generic green tea never establish matcha', () => {
  assert.equal(candidateTypeFromEvidence('importer'),'unconfirmed');
 });
 test('official URL remains empty for missing, unsafe, or directory websites', () => {
- for (const u of [undefined,'javascript:alert(1)','https://a:b@example.com','https://www.importyeti.com/company/test','https://facebook.com/example']) assert.equal(candidateWebsite(u),'');
+ for (const u of [undefined,'javascript:alert(1)','https://a:b@example.com','https://www.importyeti.com/company/test','https://facebook.com/example','https://calendly.com/example-tasting','https://www.calendly.com/example-tasting']) assert.equal(candidateWebsite(u),'');
+ assert.equal(candidateWebsite('https://calendly.com.example.com/'),'https://calendly.com.example.com/');
  assert.equal(candidateWebsite('https://example.com/wholesale?utm_source=x#top'),'https://example.com/wholesale');
 });
 test('same source company across keywords merges all discovery evidence', () => {
@@ -49,7 +50,7 @@ test('domain alone or conflicting legal names/locations never merge', () => {
  assert.equal(deduplicateCandidates([a,placeToCandidate(place({id:'2',formattedAddress:''}),'matcha importer')]).duplicatesRemoved,0);
 });
 test('unsupported country, freeform query, trade filters and excessive limits are rejected', () => {
- for (const value of [null,{...conditions,country:'FR'},{...conditions,keywords:[]},{...conditions,keywords:['other']},{...conditions,keywords:Array(4).fill('matcha importer')},{...conditions,limit:31},{...conditions,hsCodes:['090210']}]) assert.throws(()=>normalizeConditions(value));
+ for (const value of [null,{...conditions,country:'GB'},{...conditions,keywords:[]},{...conditions,keywords:['other']},{...conditions,keywords:Array(4).fill('matcha importer')},{...conditions,limit:31},{...conditions,hsCodes:['090210']}]) assert.throws(()=>normalizeConditions(value));
  assert.deepEqual(normalizeConditions({...conditions,keywords:['matcha importer','matcha importer']}).keywords,['matcha importer']);
 });
 test('live provider makes at most 3 search requests and never visits any company website', async () => {
@@ -80,4 +81,49 @@ test('partial failure retains acquired candidates and reports missing coverage',
 test('candidate limit stops further queries, with no pagination', async () => {
  let calls=0; const result=await createGooglePlacesProvider('fixture',async()=>{calls++;return response([place()]);}).search({...conditions,limit:1});
  assert.equal(calls,1); assert.equal(result.candidates.length,1);
+});
+
+const { countryProfiles, isCountry } = require('../services/overseas/countryProfiles.ts');
+const { extract } = require('../services/overseas/extraction.ts');
+const euCountries = ['DE','FR','NL','IT','ES','BE','AT','PL','IE','PT','LU','DK','SE','FI','CZ','SK','HU','SI','HR','RO','BG','GR','CY','MT','LT','LV','EE'];
+const nonEuCountries = ['US','TH','KR','TW','IN','VN'];
+const supportedCountries = [...nonEuCountries, ...euCountries];
+test('all EU 27 and existing non-EU countries are configured exactly once, while China remains excluded',()=>{
+ assert.equal(euCountries.length,27); assert.equal(new Set(euCountries).size,27);
+ assert.ok(euCountries.every(isCountry)); assert.ok(nonEuCountries.every(isCountry)); assert.equal(isCountry('CN'),false);
+ assert.deepEqual(new Set(Object.keys(countryProfiles)),new Set(supportedCountries));
+});
+for (const country of supportedCountries) {
+ test(`${country}: selected region, country filtering, limits, deduplication and research handoff`,async()=>{
+  const profile=countryProfiles[country]; const calls=[];
+  const local=place({addressComponents:[{types:['country'],shortText:country}]});
+  const foreign=place({id:'foreign',addressComponents:[{types:['country'],shortText:country==='US'?'DE':'US'}]});
+  const provider=createGooglePlacesProvider('fixture',async(url,options)=>{calls.push({url,body:JSON.parse(options.body)});return response([local,foreign,place({id:'missing-country',addressComponents:[]})]);});
+  const conditions={country,keywords:profile.candidateSearch.defaults,limit:30};
+  const result=await provider.search(conditions);
+  assert.equal(calls.length,3); assert.equal(result.candidates.length,1);assert.equal(result.duplicatesRemoved,2);
+  assert.equal(result.candidates[0].country,country);
+  assert.ok(result.warnings[0].includes(profile.label));
+  for(const call of calls){assert.equal(call.body.regionCode,country);assert.ok(call.body.textQuery.endsWith('in '+profile.candidateSearch.placeName));assert.equal(call.body.pageSize,10);}
+  for(const keyword of profile.candidateSearch.keywords) assert.doesNotThrow(()=>normalizeConditions({country,keywords:[keyword]}));
+  const c=result.candidates[0];
+  const researched=extract({id:'handoff',name:c.companyName,country:c.country,website:c.candidateOfficialUrl},[{url:c.candidateOfficialUrl,html:'<h1>Matcha powder</h1><p>We supply matcha powder to wholesale customers.</p>',fetchedAt:new Date().toISOString()}]);
+  assert.equal(researched.country,country);assert.equal(researched.assessment,'B');assert.ok(researched.products.every(p=>p.origin==='未確認'));
+ });
+}
+test('country-specific terms cannot be submitted for a different country',()=>{
+ assert.throws(()=>normalizeConditions({country:'US',keywords:['Matcha Großhandel']}));
+ assert.throws(()=>normalizeConditions({country:'DE',keywords:['grossiste matcha']}));
+ assert.throws(()=>normalizeConditions({country:'TH',keywords:['말차 도매']}));
+ assert.throws(()=>normalizeConditions({country:'IN',keywords:['matcha bán sỉ']}));
+ for(const country of ['CN','GB','toString','__proto__']) assert.equal(isCountry(country),false);
+});
+test('same Places identifier in different countries is never merged',()=>{
+ const rows=supportedCountries.map(country=>placeToCandidate(place({addressComponents:[{types:['country'],shortText:country}]}),'matcha importer',country));
+ assert.equal(deduplicateCandidates(rows).candidates.length,supportedCountries.length);
+});
+test('Netherlands official contact address works without changing US/DE/FR address formats',()=>{
+ const input={id:'nl',name:'Example Tea',country:'NL',website:'https://example.com/'};
+ const c=extract(input,[{url:'https://example.com/contact',fetchedAt:new Date().toISOString(),html:'<h1>Example Tea</h1><p>Tea Street 1<br>1234 AB Amsterdam<br>Nederland</p><h2>Matcha powder</h2><p>We supply Japanese matcha powder to wholesale customers.</p>'}]);
+ assert.equal(c.identityConfirmed,true);assert.ok(c.address.includes('1234 AB'));assert.equal(c.assessment,'A');
 });

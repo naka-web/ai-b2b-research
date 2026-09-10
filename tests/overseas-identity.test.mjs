@@ -58,7 +58,7 @@ test('weak signals alone, search snippets, unrelated company names and articles 
  assert.equal(extract(input,[page(branded('Matchia is a US-based supplier.'),'https://matchia.us/blogs/news/industry'),product]).identityConfirmed,false);
  assert.equal(extract({...input,name:'Other company'},[page(branded('Matchia is a US-based supplier.')),product]).identityConfirmed,false);
 });
-test('identity alone does not bypass Japanese product or own B2B requirements',()=>{
+test('identity alone does not bypass matcha product or own B2B requirements',()=>{
  const identity=page(branded('Matchia is a US-based company.'));
  assert.notEqual(extract(input,[identity]).assessment,'A');
  const c=extract(input,[identity,page('<h1>Japanese Matcha</h1><p>Origin: Japan. Pure matcha powder.</p>')]); assert.equal(c.assessment,'B'); assert.ok(c.reasons.some(r=>r.includes('B2B')));

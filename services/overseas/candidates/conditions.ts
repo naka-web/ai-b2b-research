@@ -1,8 +1,5 @@
-export const USA_KEYWORDS = [
-  'matcha importer', 'matcha distributor', 'matcha wholesaler',
-  'Japanese matcha importer', 'Japanese matcha distributor',
-  'Japanese green tea importer', 'matcha supplier', 'wholesale matcha', 'bulk matcha',
-] as const;
+import { countryProfiles } from '../countryProfiles';
+export const USA_KEYWORDS = countryProfiles.US.candidateSearch.keywords;
 export const TRADE_FILTERS = {
   hsCodes: ['090210', '090220'],
   productTerms: ['matcha', 'matcha powder', 'green tea powder', 'powdered green tea', 'Japanese green tea'],

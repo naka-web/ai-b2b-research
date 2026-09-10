@@ -3,6 +3,8 @@ import { countryProfiles } from './countryProfiles';
 import { normalizedName } from './deduplication';
 import { assess } from './assessment';
 import { officialSelfIdentity } from './identity';
+import { confirmedContactForm, contactStatus } from './contact';
+import { companyRoles } from './companyRoles';
 import { pendingCompany, type PageSnapshot, type ResearchInput, type Product, type Relationship } from './types';
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 const matcha = /\bmatcha\b|抹茶/i;
@@ -25,6 +27,15 @@ export function extract(input: ResearchInput, pages: PageSnapshot[]) {
   const legalNames = new Set<string>();
   const selfCountries = new Set<string>();
   for (const page of pages) {
+    const form = confirmedContactForm(page, input.website);
+    if (form && !result.contactFormUrl) { result.contactFormUrl = form.url; add('contactForm', form.quote, page); }
+    for (const finding of companyRoles(input, page)) {
+      result.companyRoles = result.companyRoles.filter(r => r.role !== 'unknown');
+      if (!result.companyRoles.some(r => r.role === finding.role)) {
+        result.companyRoles.push(finding);
+        add(`role:${finding.role}`, finding.evidenceText!, page);
+      }
+    }
     for (const finding of officialSelfIdentity(input, page)) {
       selfCountries.add(finding.country);
       if (finding.country === input.country) { result.identityConfirmed = true; add('identity', finding.quote, page); }
@@ -56,7 +67,7 @@ export function extract(input: ResearchInput, pages: PageSnapshot[]) {
     if (identityPage && nameMatches) {
       const legalLine = lines.find(l => l.length < 200 && /\b(?:GmbH|GbR|UG\b|Inc\.?|LLC|Ltd\.?|SARL|SAS\b|SASU|S\.A\.)/.test(l) && (normalizedName(l).includes(needle) || needle.includes(normalizedName(l))));
       const namedLine = legalLine || lines.find(l => l.length < 140 && normalizedName(l).includes(needle));
-      const postalIndex = lines.findIndex(l => input.country === 'US' ? /\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(l) : /\b\d{5}\s+[\p{L}]/u.test(l));
+      const postalIndex = lines.findIndex(l => input.country === 'US' ? /\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(l) : input.country === 'NL' ? /\b\d{4}\s?[A-Z]{2}\s+[\p{L}]/u.test(l) : /\b\d{5}\s+[\p{L}]/u.test(l));
       if (namedLine && postalIndex >= 0) {
         const address = lines.slice(Math.max(0, postalIndex - 1), postalIndex + 3).join(', ');
         if (countryProfiles[input.country].country.test(address) || (input.country === 'US' && /\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY|DC)\s+\d{5}\b/.test(address))) {
@@ -68,7 +79,6 @@ export function extract(input: ResearchInput, pages: PageSnapshot[]) {
     for (const email of emails) if (!result.emails.includes(email) && (email.toLowerCase().endsWith('@' + new URL(page.url).hostname.replace(/^www\./, '')) || /gmail\.com|outlook\.com|yahoo\.com|gmx\.de|web\.de/i.test(email))) { result.emails.push(email); add('email', email, page); }
     const phones = [...$('a[href^="tel:"]').filter((_, e) => !/fax|^F:/i.test($(e).parent().text())).map((_, e) => $(e).attr('href')!.slice(4)).get(), ...lines.filter(l => /^(?:Tel(?:ephone|efon)?\.?|Phone|Tél(?:éphone)?\.?|T:)\s*[:.]?/i.test(l)).map(l => l.replace(/^[^\d+]+/, ''))];
     for (const phone of phones) { const p = phone.slice(0, 70); if ((p.match(/\d/g) || []).length >= 7 && !result.phones.some(old => old.replace(/\(0\)/g, '').replace(/\D/g, '') === p.replace(/\(0\)/g, '').replace(/\D/g, ''))) { result.phones.push(p); add('phone', p, page); } }
-    if (/contact|kontakt/i.test(`${page.url} ${$('h1').text()}`) && $('form').toArray().some(el => $(el).find('textarea').length && $(el).find('input[type="email"], input[name*="mail"]').length)) { result.contactFormUrl = page.url; add('contactForm', '問い合わせページにメール入力欄と本文入力欄のあるフォームを確認', page); }
     // Keep individual product cards/heading sections separate; never apply a site's Japan mention to every product.
     const scopes: { title: string; text: string; url: string; explicitProduct?: boolean }[] = [];
     for (const o of structured) if (String(o['@type']).includes('Product') && typeof o.name === 'string') {
@@ -139,6 +149,8 @@ export function extract(input: ResearchInput, pages: PageSnapshot[]) {
     result.identityConfirmed = false;
     result.warnings.push('会社自身の拠点記述が対象国と矛盾するか、複数国にまたがっています。会社主体を確認してください。');
   }
+  result.email = result.emails[0] || null;
+  result.contactStatus = contactStatus(result.emails, result.contactFormUrl, !pages.length);
   Object.assign(result, assess(result));
   return result;
 }

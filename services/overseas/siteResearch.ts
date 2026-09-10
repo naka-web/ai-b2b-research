@@ -7,6 +7,7 @@ import ipaddr from 'ipaddr.js';
 import { canonicalWebsite, domainKey } from './deduplication';
 import { countryProfiles } from './countryProfiles';
 import { extract } from './extraction';
+import { contactPagePattern, contactStatus } from './contact';
 import type { PageSnapshot, ResearchInput } from './types';
 const TTL = 30 * 24 * 60 * 60 * 1000;
 const cache = new Map<string, { at: number; body: string; type: string; status: number; location?: string }>();
@@ -115,16 +116,16 @@ export async function research(input: ResearchInput, refresh = false) {
       try {
         const url = canonicalWebsite(new URL($(el).attr('href')!, snapshot.url).toString());
         if (domainKey(url) !== host || /\.(?:pdf|zip|jpg|png|svg|mp4|xml)$/i.test(new URL(url).pathname) || /logout|login|cart|checkout|account|search\?/i.test(url)) return;
-        const label = `${$(el).text()} ${url}`;
-        const score = /terms|conditions|nutzungsbedingungen|conditions-generales/i.test(label) ? 150 :
-          countryProfiles[input.country].legal.test(label) ? 120 : /wholesale|B2B|Großhandel|grosshandel|grossiste|professionnel/i.test(label) ? 100 : /matcha|抹茶/i.test(label) ? 90 : /product|produit|sortiment|about|contact|kontakt/i.test(label) ? 50 : 0;
+        const label = `${$(el).text()} ${new URL(url).pathname}`;
+        const score = contactPagePattern.test(label) ? 160 : /terms|conditions|nutzungsbedingungen|conditions-generales/i.test(label) ? 150 :
+          countryProfiles[input.country].legal.test(label) ? 120 : /wholesale|B2B|Großhandel|grosshandel|grossiste|professionnel|groothandel|horeca|import|distribut|about|over-ons|qui-sommes|ueber-uns|business|company/i.test(label) ? 110 : /matcha|抹茶/i.test(label) ? 90 : /product|produit|sortiment/i.test(label) ? 50 : 0;
         if (score && !visited.has(url) && !queue.some(q => q.url === url)) queue.push({ url, score });
       } catch { /* invalid link */ }
     });
   };
   while (!blocked && queue.length && pages.length < 6 && Date.now() - started < 42_000) {
     const known = extract(input, pages);
-    const priority = (q: { url: string; score: number }) => q.score === 120 && known.identityConfirmed ? q.score - 100 : q.score;
+    const priority = (q: { url: string; score: number }) => q.score === 160 && known.contactFormUrl ? 40 : q.score === 120 && known.identityConfirmed ? q.score - 100 : q.score;
     queue.sort((a, b) => priority(b) - priority(a)); const next = queue.shift()!; if (visited.has(next.url)) continue; visited.add(next.url);
     try {
       const snapshot = await page(next.url); if (pages.some(p => p.url === snapshot.url)) continue;
@@ -133,10 +134,11 @@ export async function research(input: ResearchInput, refresh = false) {
       pages.push(snapshot); visited.add(snapshot.url); enqueue(snapshot);
 
       const current = extract(input, pages);
-      if (current.assessment === 'A' && (current.emails.length || current.contactFormUrl) && !queue.some(q => q.score >= 120)) break;
+      if (current.assessment === 'A' && (current.emails.length || current.contactFormUrl) && !queue.some(q => q.score >= 110)) break;
     } catch (e) { warnings.push(e instanceof Error ? e.message : 'ページ取得に失敗しました'); if (requests >= 8) break; }
   }
   const result = extract(input, pages); result.requests = requests; result.cacheHits = cacheHits; result.warnings.push(...warnings);
+  result.contactStatus = contactStatus(result.emails, result.contactFormUrl, blocked || warnings.length > 0 || !pages.length);
   if (blocked || (warnings.length && result.assessment !== 'A')) result.status = '確認待ち';
   if ((blocked || warnings.length) && result.assessment === 'C') {
     result.assessment = null;

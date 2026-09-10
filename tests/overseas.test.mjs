@@ -12,7 +12,7 @@ const input = { id: '1', name: 'Example Tea', country: 'DE', website: 'https://e
 const page = (html, url = 'https://example.com/products') => ({ html, url, fetchedAt: '2026-09-08T00:00:00.000Z' });
 const legal = page('<h1>Impressum</h1><p>Example Tea GmbH</p><p>Teestrasse 5</p><p>20457 Hamburg</p><p>Deutschland</p><p>Telefon: +49 40 1234567</p><a href="mailto:office@example.com">Kontakt</a>', 'https://example.com/impressum');
 const wholesale = page('<h1>Großhandel</h1><p>Wir bieten japanischen Matcha für den Großhandel und B2B Kunden in Deutschland.</p>');
-test('A requires country identity + Japanese matcha + own B2B, not supplier name', () => {
+test('A requires country identity + matcha + own B2B, not supplier name or Japanese origin', () => {
  const c = extract(input, [legal, wholesale, page('<h1>Japanese Matcha</h1><p>Origin: Japan. Pure matcha powder for matcha latte.</p>')]);
  assert.equal(c.assessment, 'A'); assert.equal(c.suppliers.length, 0); assert.equal(c.products.find(p=>p.name==='Japanese Matcha').kind, '抹茶原料・茶商品');
  assert.ok(c.phones.length); assert.ok(c.emails.length);
@@ -27,9 +27,9 @@ test('style and tradition are not Japanese origin evidence', () => {
  assert.equal(c.assessment, 'B'); assert.ok(c.products.every(p=>p.origin==='未確認'));
 });
 test('no pages is review pending, never C', () => { const c = extract(input, []); assert.equal(c.assessment, null); assert.equal(c.status, '確認待ち'); });
-test('processed products only are C; China only is separate from Japanese candidates', () => {
+test('processed products only remain C; Chinese matcha remains eligible', () => {
  assert.equal(extract(input, [page('<h1>Matcha cookies</h1><p>Our cookies contain matcha from Japan.</p>')]).assessment, 'C');
- const c = extract(input, [legal, page('<h1>China Matcha</h1><p>Matcha powder. Origin: China.</p>')]); assert.equal(c.assessment, 'C'); assert.ok(c.reasons[0].includes('別枠'));
+ const c = extract(input, [legal, page('<h1>China Matcha</h1><p>Matcha powder. Origin: China.</p>')]); assert.equal(c.assessment, 'B'); assert.ok(c.products.some(p=>p.origin==='CN'));
 });
 test('France legal address and French wholesale evidence', () => {
  const c = extract({...input, country:'FR'}, [page('<h1>Mentions légales</h1><p>Example Tea SAS</p><p>10 Rue du Thé</p><p>75001 Paris</p><p>France</p>', 'https://example.com/mentions-legales'), page('<h1>Matcha japonais</h1><p>Notre matcha japonais est une poudre de thé. Nous fournissons notre matcha aux professionnels de la restauration.</p>')]); assert.equal(c.assessment, 'A');
@@ -64,7 +64,7 @@ for (const country of ['US', 'FR', 'DE']) {
   }
   for (const style of ['Japanese style', 'Japanese-style', 'Japanese matcha style']) {
    const c = extract(company, [identity, supply, page(`<h1>Matcha powder</h1><p>${style}. Pure matcha powder for beverages.</p>`)]);
-   assert.equal(c.assessment, 'B', style);
+   assert.equal(c.assessment, 'A', style);
    assert.ok(c.products.every(p => p.origin === '未確認'), style);
   }
   const mixed = extract(company, [identity, supply, page('<div class="product-card"><h2>Matcha Japan</h2><p>Pure matcha powder. Origin: Japan.</p></div><div class="product-card"><h2>Matcha China</h2><p>Pure matcha powder. Origin: China.</p></div>')]);
@@ -72,7 +72,7 @@ for (const country of ['US', 'FR', 'DE']) {
   assert.equal(mixed.products.find(p => p.name === 'Matcha China').origin, 'CN');
   for (const p of mixed.products) for (const id of p.evidenceIds) assert.ok(mixed.evidence.some(e => e.id === id && e.url && e.quote && e.checkedAt));
   assert.equal(extract(company, [identity, page('<h1>Matcha latte mix</h1><p>Sweetened Japanese matcha latte mix with milk.</p>')]).assessment, 'C');
-  assert.equal(extract(company, [identity, page('<h1>Matcha powder</h1><p>Origin: China.</p>')]).assessment, 'C');
+  assert.equal(extract(company, [identity, page('<h1>Matcha powder</h1><p>Origin: China.</p>')]).assessment, 'B');
   assert.equal(extract(company, []).assessment, null);
  });
 }
