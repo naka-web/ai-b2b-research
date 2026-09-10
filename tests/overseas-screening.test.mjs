@@ -32,6 +32,15 @@ test('website discovery terminal states remain distinct',()=>{
   assert.equal(screeningStatusFromWebsite('not_searched'),'pending');
 });
 
+test('direct research requests screening and preserves prior evidence on a total refetch failure',()=>{
+  const pageSource=readFileSync(new URL('../app/overseas/page.tsx',import.meta.url),'utf8');
+  const routeSource=readFileSync(new URL('../app/api/overseas/research/route.ts',import.meta.url),'utf8');
+  assert.match(pageSource,/refresh, screening: true/);
+  assert.match(routeSource,/if \(input\.screening === true\) company = applyScreening\(company\)/);
+  assert.match(pageSource,/data\.company\.screeningStatus === 'fetch_failed' && \(c\.pages\.length \|\| c\.evidence\.length \|\| c\.products\.length\)/);
+  assert.match(pageSource,/以前の調査結果と根拠を保持/);
+});
+
 test('batch researches verified candidates only, continues after one failure, and preserves evidence for saving',async()=>{
   const rows=[candidate('raw'),candidate('ambiguous','ambiguous'),candidate('failed')]; const researched=[]; const saved=[];
   const result=await screenTradeCandidateBatch(rows,{existing:new Map(),lookup:async value=>value,research:async value=>{

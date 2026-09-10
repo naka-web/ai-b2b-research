@@ -23,7 +23,7 @@ export async function POST(request: Request) {
       let company = await research({ id: input.id, name: input.name.trim(), country: input.country, website, discoveryEvidence }, input.refresh === true);
       const generated = await generateEvidenceSummaries(company, { apiKey: process.env.OPENAI_API_KEY });
       company.evidenceSummaries = generated.summaries; company.evidenceSummaryRequests = generated.apiRequests; company.evidenceSummaryVersion = '1';
-      if (input.screening === true && discoveryEvidence?.length) company = applyScreening(company);
+      if (input.screening === true) company = applyScreening(company);
       return Response.json({ company });
     }
     finally { active--; }

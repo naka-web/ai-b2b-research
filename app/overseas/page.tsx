@@ -2,11 +2,13 @@
 import Link from 'next/link';
 import UsaCandidateSearch from './UsaCandidateSearch';
 import TradeCandidateImport from './TradeCandidateImport';
+import ExportPanel from './ExportPanel';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { UsaCandidate } from '@/services/overseas/candidates/types';
 import { countryProfiles } from '@/services/overseas/countryProfiles';
 import { canonicalWebsite, findDuplicate } from '@/services/overseas/deduplication';
 import { loadCompanies, saveCompany } from '@/services/overseas/clientStore';
+import { applyScreening } from '@/services/overseas/candidates/screening';
 import { pendingCompany, type Country, type OverseasCompany } from '@/services/overseas/types';
 const external = { target: '_blank', rel: 'noopener noreferrer' };
 export default function OverseasPage() {
@@ -37,10 +39,17 @@ export default function OverseasPage() {
   async function run(c: OverseasCompany, refresh = false) {
     if (lock.current) return; lock.current = true; setBusy(c.id); setError(''); setMessage(''); setSelected(c.id);
     try {
-      if (!refresh && c.ruleVersion === '2' && c.evidenceSummaryVersion === '1' && c.status === '完了' && c.checkedAt && Date.now() - Date.parse(c.checkedAt) < 30 * 86400_000) { setMessage('30日以内の保存済み結果を表示しました。外部リクエストは実行していません。'); return; }
+      if (!refresh && c.ruleVersion === '2' && c.evidenceSummaryVersion === '1' && !c.screeningVersion && c.status === '完了' && c.checkedAt && Date.now() - Date.parse(c.checkedAt) < 30 * 86400_000) {
+        await persist(applyScreening(c)); setMessage('30日以内の保存済み結果にscreening判定を適用しました。外部リクエストは実行していません。'); return;
+      }
+      if (!refresh && c.ruleVersion === '2' && c.evidenceSummaryVersion === '1' && c.screeningVersion === '1' && c.status === '完了' && c.checkedAt && Date.now() - Date.parse(c.checkedAt) < 30 * 86400_000) { setMessage('30日以内の保存済み結果を表示しました。外部リクエストは実行していません。'); return; }
       await persist({ ...c, status: '調査中' });
-      const response = await fetch('/api/overseas/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c.id, name: c.name, country: c.country, website: c.website, discoveryEvidence: c.discoveryEvidence, refresh }) });
+      const response = await fetch('/api/overseas/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c.id, name: c.name, country: c.country, website: c.website, discoveryEvidence: c.discoveryEvidence, refresh, screening: true }) });
       const data = await response.json(); if (!response.ok || !data.company) throw new Error(data.error || '調査に失敗しました');
+      if (data.company.screeningStatus === 'fetch_failed' && (c.pages.length || c.evidence.length || c.products.length)) {
+        const retained = applyScreening({ ...c, warnings: [...c.warnings, ...data.company.warnings.map((warning: string) => `再取得失敗: ${warning}`)] });
+        await persist(retained); setMessage('再取得に失敗したため、以前の調査結果と根拠を保持しました。'); return;
+      }
       await persist(data.company); setMessage(`${transientIds.current.has(c.id) ? '調査結果を画面内に表示しました（候補由来のため永続保存なし）。' : '調査結果を保存しました。'}外部HTTP ${data.company.requests}回／キャッシュ利用 ${data.company.cacheHits}回`);
     } catch (e) {
       const text = e instanceof Error ? e.message : '調査に失敗しました'; setError(text);
@@ -81,6 +90,7 @@ export default function OverseasPage() {
       <header><p className="text-sm font-semibold text-emerald-700">海外企業調査 · 手動入力MVP</p><h1 className="mt-2 text-3xl font-semibold">抹茶関連の海外企業</h1><p className="mt-3 text-sm text-slate-600">公式サイトの公開HTMLを必要な範囲で確認します。日本産・Supplier名は必須条件ではありません。判定処理には検索・Places・生成AI APIを使わず、日本語要約だけを確認補助として生成します。取得制限や読めないページは確認待ちになります。</p></header>
       <UsaCandidateSearch disabled={!!busy || !ready} onSelect={selectCandidate} />
       <TradeCandidateImport disabled={!!busy || !ready} onSelect={selectCandidate} companies={companies} onScreened={persistScreened} />
+      <ExportPanel disabled={!!busy || !ready} companies={companies} />
       <h2 className="text-xl font-semibold">手動入力・選択した企業の調査</h2>
       {candidateInput && <div className="rounded border border-sky-200 bg-sky-50 p-3 text-sm"><p>{candidateInput.provider === 'google_places' ? 'Google Mapsの候補から入力しています。この調査結果は画面内のみで、再読み込みすると消えます。' : 'HS / Trade Data候補から入力しています。元の取引根拠は公式サイト調査後も結果に保持されます。'}</p><button type="button" disabled={!!busy} className="mt-2 underline" onClick={() => { setCandidateInput(null); setName(''); setWebsite(''); }}>候補入力をクリアして手入力に戻る</button></div>}
       <form ref={manualForm} onSubmit={submit} className="grid gap-4 rounded-xl border border-slate-200 bg-white p-5 md:grid-cols-[160px_1fr_2fr_auto]">
